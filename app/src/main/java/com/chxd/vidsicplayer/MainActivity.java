@@ -1,9 +1,14 @@
 package com.chxd.vidsicplayer;
 
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.app.PendingIntent;
 import android.content.ContentValues;
+import android.database.ContentObserver;
+import android.database.Cursor;
+import android.os.SystemClock;
+import android.provider.OpenableColumns;
+import java.io.InputStream;
+import java.io.OutputStream;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -21,14 +26,11 @@ import android.provider.MediaStore;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.WindowManager;
 import android.widget.BaseAdapter;
-import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
-import android.widget.PopupWindow;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.Switch;
@@ -63,7 +65,14 @@ public class MainActivity extends Activity implements Engine.L {
     Runnable pendingDelAfter;
     Media pendingRen;
     String pendingRenName;
-    PopupWindow queuePop;
+    FrameLayout queueLayer;       // play queue overlay (null when closed)
+    BaseAdapter queueAd;
+    TextView queueHead;
+    String pendingSpecKey;
+    boolean loading, reloadQueued;
+    long lastLoad;
+    ContentObserver mediaObs;
+    final Runnable autoRescan = () -> loadMedia();
     final Handler h = new Handler(Looper.getMainLooper());
     final Runnable ticker = new Runnable() {
         public void run() {
@@ -85,10 +94,23 @@ public class MainActivity extends Activity implements Engine.L {
         buildUi();
         loadMedia();
         if (needsPermissions()) requestPermissions(perms(), 1);
+        // "Auto rescan library": pick up files that are added / removed / renamed while the app is open
+        mediaObs = new ContentObserver(h) {
+            @Override public void onChange(boolean self) {
+                if (!store.bool("auto_rescan", false)) return;
+                h.removeCallbacks(autoRescan);
+                h.postDelayed(autoRescan, 2000);
+            }
+        };
+        try {
+            getContentResolver().registerContentObserver(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, true, mediaObs);
+            getContentResolver().registerContentObserver(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, true, mediaObs);
+        } catch (Exception e) { }
     }
 
     void buildUi() {
-        if (queuePop != null && queuePop.isShowing()) queuePop.dismiss();
+        queueLayer = null;
+        queueAd = null;
         if (player != null) engine.ls.remove(player);
         Ui.apply(this, store);
         getWindow().setStatusBarColor(Ui.BG);
@@ -133,10 +155,18 @@ public class MainActivity extends Activity implements Engine.L {
     @Override protected void onResume() {
         super.onResume();
         h.post(ticker);
-        if (wantHidden() && !scanned && Environment.isExternalStorageManager()) loadMedia();
+        engine.spec.uiVisible = true;
+        engine.spec.update();
+        if (store.bool("auto_rescan", false) && SystemClock.uptimeMillis() - lastLoad > 3000) loadMedia();
+        else if (wantHidden() && !scanned && Environment.isExternalStorageManager()) loadMedia();
         else if (stats != null) refreshStats();
     }
-    @Override protected void onPause() { super.onPause(); h.removeCallbacks(ticker); }
+    @Override protected void onPause() {
+        super.onPause();
+        h.removeCallbacks(ticker);
+        engine.spec.uiVisible = false; // no point reading the audio while nobody can see it
+        engine.spec.update();
+    }
 
     @Override
     protected void onDestroy() {
@@ -144,7 +174,8 @@ public class MainActivity extends Activity implements Engine.L {
         // playback keeps going (it lives in the engine + notification service); just detach this screen
         engine.ls.remove(this);
         if (player != null) engine.ls.remove(player);
-        if (queuePop != null && queuePop.isShowing()) queuePop.dismiss();
+        h.removeCallbacks(autoRescan);
+        try { getContentResolver().unregisterContentObserver(mediaObs); } catch (Exception e) { }
     }
 
     // ---------- permissions & loading ----------
@@ -168,33 +199,56 @@ public class MainActivity extends Activity implements Engine.L {
     }
 
     @Override
-    public void onRequestPermissionsResult(int code, String[] p, int[] r) { loadMedia(); }
+    public void onRequestPermissionsResult(int code, String[] p, int[] r) {
+        if (code == 2) { // microphone permission, needed by Android to read the audio spectrum
+            boolean ok = r.length > 0 && r[0] == PackageManager.PERMISSION_GRANTED;
+            if (ok) engine.fire();
+            else {
+                if (pendingSpecKey != null) store.setBool(pendingSpecKey, false);
+                rebuildUi();
+                Ui.notice(this, "Permission needed", "Android only lets an app read the audio spectrum with the Microphone permission. "
+                        + "Nothing is recorded. You can allow it in the app settings and turn this on again.");
+            }
+            pendingSpecKey = null;
+            return;
+        }
+        loadMedia();
+    }
 
     boolean wantHidden() { return store.bool("hid_a", false) || store.bool("hid_v", false) || store.bool("hid_f", false); }
 
     void loadMedia() {
+        if (loading) { reloadQueued = true; return; }
+        loading = true;
+        lastLoad = SystemClock.uptimeMillis();
         new Thread(() -> {
-            final List<Media> la = MediaLoader.load(this, false), lv = MediaLoader.load(this, true);
-            boolean sc = false;
-            if (wantHidden() && Environment.isExternalStorageManager()) {
-                try { MediaLoader.scanHidden(la, lv); sc = true; } catch (Exception e) { }
-            }
-            final boolean did = sc;
-            for (Media m : la) { String t = store.renamed(m); if (t != null) m.title = t; }
-            for (Media m : lv) { String t = store.renamed(m); if (t != null) m.title = t; }
-            java.util.Comparator<Media> cmp = (x, y) -> Long.compare(y.added, x.added);
-            Collections.sort(la, cmp);
-            Collections.sort(lv, cmp);
-            h.post(() -> {
-                audios = la;
-                videos = lv;
-                scanned = did;
-                byKey.clear();
-                for (Media m : la) byKey.put(m.key(), m);
-                for (Media m : lv) byKey.put(m.key(), m);
-                refreshAll();
-            });
+            try { loadNow(); } catch (Throwable t) { h.post(() -> loading = false); }
         }).start();
+    }
+
+    void loadNow() {
+        final List<Media> la = MediaLoader.load(this, false), lv = MediaLoader.load(this, true);
+        boolean sc = false;
+        if (wantHidden() && Environment.isExternalStorageManager()) {
+            try { MediaLoader.scanHidden(la, lv); sc = true; } catch (Exception e) { }
+        }
+        final boolean did = sc;
+        for (Media m : la) { String t = store.renamed(m); if (t != null) m.title = t; }
+        for (Media m : lv) { String t = store.renamed(m); if (t != null) m.title = t; }
+        java.util.Comparator<Media> cmp = (x, y) -> Long.compare(y.added, x.added);
+        Collections.sort(la, cmp);
+        Collections.sort(lv, cmp);
+        h.post(() -> {
+            audios = la;
+            videos = lv;
+            scanned = did;
+            byKey.clear();
+            for (Media m : la) byKey.put(m.key(), m);
+            for (Media m : lv) byKey.put(m.key(), m);
+            loading = false;
+            refreshAll();
+            if (reloadQueued) { reloadQueued = false; loadMedia(); }
+        });
     }
 
     boolean visible(Media m, boolean folders) {
@@ -254,6 +308,7 @@ public class MainActivity extends Activity implements Engine.L {
 
     @Override
     public void onBackPressed() {
+        if (queueLayer != null) { hideQueue(); return; }
         if (player.getVisibility() == View.VISIBLE) {
             if (player.onBack()) return; // locked
             closePlayer();
@@ -343,6 +398,7 @@ public class MainActivity extends Activity implements Engine.L {
     public void changed() {
         updateMini();
         refreshAll();
+        if (queueAd != null && queueLayer != null) { queueAd.notifyDataSetChanged(); updateQueueHead(); }
     }
 
     void openPlayer() {
@@ -364,18 +420,43 @@ public class MainActivity extends Activity implements Engine.L {
         openPlayer();
     }
 
-    // ---------- queue popup (anchored above the bottom bars) ----------
+    // ---------- play queue (overlay above the bottom bars) ----------
+    // Row: [3-bar drag handle][thumbnail][title / author][duration].
+    // Hold the handle and drag to re-arrange. Tap a row for: play, remove from queue, add to playlist, favorite.
+    void hideQueue() {
+        if (queueLayer != null && queueLayer.getParent() != null) root.removeView(queueLayer);
+        queueLayer = null;
+        queueAd = null;
+        queueHead = null;
+    }
+
+    void updateQueueHead() {
+        if (queueHead != null) queueHead.setText("Play queue (" + engine.queue.size() + ")");
+    }
+
     void showQueue() {
-        if (queuePop != null && queuePop.isShowing()) queuePop.dismiss();
-        final PopupWindow pw = new PopupWindow(this);
-        queuePop = pw;
+        hideQueue();
+        final FrameLayout layer = new FrameLayout(this);
+        layer.setOnClickListener(v -> hideQueue()); // tap outside closes it
+        queueLayer = layer;
+
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        TextView hd = Ui.text(this, "Play queue (" + engine.queue.size() + ")", 16, Ui.TXT, true);
-        hd.setPadding(Ui.dp(this, 16), Ui.dp(this, 14), Ui.dp(this, 16), Ui.dp(this, 8));
-        box.addView(hd);
-        ListView lv = new ListView(this);
+        box.setClickable(true);
+        box.setBackground(Ui.shape(Ui.SURF, 16, this));
+        box.setElevation(Ui.dp(this, 12));
+        queueHead = Ui.text(this, "", 16, Ui.TXT, true);
+        queueHead.setPadding(Ui.dp(this, 16), Ui.dp(this, 14), Ui.dp(this, 16), Ui.dp(this, 2));
+        box.addView(queueHead);
+        updateQueueHead();
+        TextView hint = Ui.text(this, "Hold \u2261 and drag to re-arrange. Tap an item for options.", 12, Ui.SUB, false);
+        hint.setPadding(Ui.dp(this, 16), 0, Ui.dp(this, 16), Ui.dp(this, 8));
+        box.addView(hint);
+
+        final QueueList lv = new QueueList(this);
         lv.setDivider(null);
+        lv.setSelector(new android.graphics.drawable.ColorDrawable(0));
+        lv.setOverScrollMode(View.OVER_SCROLL_NEVER);
         final BaseAdapter ad = new BaseAdapter() {
             public int getCount() { return engine.queue.size(); }
             public Object getItem(int i) { return i; }
@@ -383,35 +464,64 @@ public class MainActivity extends Activity implements Engine.L {
             public View getView(int i, View cv, ViewGroup p) {
                 Media m = engine.queue.get(i);
                 boolean now = i == engine.idx;
-                LinearLayout r = new LinearLayout(MainActivity.this);
+                MainActivity c = MainActivity.this;
+                LinearLayout r = new LinearLayout(c);
                 r.setGravity(Gravity.CENTER_VERTICAL);
-                r.setPadding(Ui.dp(MainActivity.this, 16), Ui.dp(MainActivity.this, 8), Ui.dp(MainActivity.this, 16), Ui.dp(MainActivity.this, 8));
-                r.setBackground(Ui.rip(0, 0, MainActivity.this));
-                r.addView(Ui.thumbBox(MainActivity.this, m, 40), new LinearLayout.LayoutParams(Ui.dp(MainActivity.this, 40), Ui.dp(MainActivity.this, 40)));
-                LinearLayout c = new LinearLayout(MainActivity.this);
-                c.setOrientation(LinearLayout.VERTICAL);
-                c.setPadding(Ui.dp(MainActivity.this, 12), 0, Ui.dp(MainActivity.this, 8), 0);
-                c.addView(Ui.text(MainActivity.this, m.title, 14, now ? Ui.ACC : Ui.TXT, now));
-                c.addView(Ui.text(MainActivity.this, m.artist, 12, Ui.SUB, false));
-                r.addView(c, new LinearLayout.LayoutParams(0, Ui.WRAP, 1));
-                r.addView(Ui.text(MainActivity.this, Ui.fmt(m.duration), 12, Ui.SUB, false));
+                r.setPadding(Ui.dp(c, 8), Ui.dp(c, 8), Ui.dp(c, 16), Ui.dp(c, 8));
+                r.setBackground(Ui.rip(0, 0, c));
+                ImageView grip = Ui.icon(c, R.drawable.ic_drag, Ui.SUB, 22);
+                grip.setPadding(Ui.dp(c, 8), Ui.dp(c, 8), Ui.dp(c, 8), Ui.dp(c, 8));
+                r.addView(grip, new LinearLayout.LayoutParams(Ui.dp(c, 38), Ui.dp(c, 38)));
+                LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(Ui.dp(c, 40), Ui.dp(c, 40));
+                tp.setMargins(Ui.dp(c, 4), 0, 0, 0);
+                r.addView(Ui.thumbBox(c, m, 40), tp);
+                LinearLayout col = new LinearLayout(c);
+                col.setOrientation(LinearLayout.VERTICAL);
+                col.setPadding(Ui.dp(c, 12), 0, Ui.dp(c, 8), 0);
+                col.addView(Ui.text(c, m.title, 14, now ? Ui.ACC : Ui.TXT, now));
+                col.addView(Ui.text(c, m.artist, 12, Ui.SUB, false));
+                r.addView(col, new LinearLayout.LayoutParams(0, Ui.WRAP, 1));
+                r.addView(Ui.text(c, Ui.fmt(m.duration), 12, Ui.SUB, false));
+                if (i == lv.drag) r.setAlpha(0f); // the floating copy is drawn by the list while dragging
                 return r;
             }
         };
+        queueAd = ad;
         lv.setAdapter(ad);
-        lv.setOnItemClickListener((p, v, i, id) -> { engine.playAt(i); ad.notifyDataSetChanged(); });
-        int maxH = Math.min(Ui.dp(this, 56) * Math.max(1, engine.queue.size()), root.getHeight() * 55 / 100);
+        lv.cb = new QueueList.Cb() {
+            public void move(int from, int to) { engine.moveQueue(from, to); ad.notifyDataSetChanged(); }
+            public void done() { ad.notifyDataSetChanged(); }
+        };
+        lv.setOnItemClickListener((p, v, i, id) -> queueOptions(i));
+        int maxH = Math.min(Ui.dp(this, 56) * Math.max(1, engine.queue.size()), root.getHeight() * 50 / 100);
         box.addView(lv, new LinearLayout.LayoutParams(Ui.MATCH, maxH));
-        pw.setContentView(box);
-        pw.setWidth(root.getWidth() - Ui.dp(this, 16));
-        pw.setHeight(ViewGroup.LayoutParams.WRAP_CONTENT);
-        pw.setFocusable(true);
-        pw.setOutsideTouchable(true);
-        pw.setBackgroundDrawable(Ui.shape(Ui.SURF, 16, this));
-        pw.setElevation(Ui.dp(this, 12));
+
         boolean pl = player.getVisibility() == View.VISIBLE;
-        int y = (pl ? 0 : nav.getHeight() + mini.getHeight()) + Ui.dp(this, 8);
-        pw.showAtLocation(root, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL, 0, y);
+        FrameLayout.LayoutParams bp = new FrameLayout.LayoutParams(Ui.MATCH, Ui.WRAP, Gravity.BOTTOM);
+        bp.setMargins(Ui.dp(this, 8), 0, Ui.dp(this, 8), (pl ? 0 : nav.getHeight() + mini.getHeight()) + Ui.dp(this, 8));
+        layer.addView(box, bp);
+        root.addView(layer, new FrameLayout.LayoutParams(Ui.MATCH, Ui.MATCH));
+    }
+
+    void queueOptions(final int i) {
+        if (i < 0 || i >= engine.queue.size()) return;
+        final Media m = engine.queue.get(i);
+        Ui.Sheet sh = new Ui.Sheet(this, m.title, m.artist);
+        sh.item(R.drawable.ic_play, "Play now", Ui.TXT, () -> engine.playAt(i));
+        sh.item(R.drawable.ic_close, "Remove from queue", Ui.TXT, () -> {
+            engine.removeAt(i);
+            if (engine.queue.isEmpty()) hideQueue();
+            else if (queueAd != null) { queueAd.notifyDataSetChanged(); updateQueueHead(); }
+        });
+        sh.item(R.drawable.ic_playlist, "Add in playlist", Ui.TXT, () -> pickPlaylist(Collections.singletonList(m), null));
+        boolean f = store.isFav(m);
+        sh.item(f ? R.drawable.ic_heart_fill : R.drawable.ic_heart, f ? "Remove from favorites" : "Add to favorites", Ui.TXT, () -> {
+            store.toggleFav(m);
+            refreshAll();
+            player.changed();
+            toast(store.isFav(m) ? "Added to favorites" : "Removed from favorites");
+        });
+        sh.show();
     }
 
     // ---------- item options modal ----------
@@ -467,32 +577,12 @@ public class MainActivity extends Activity implements Engine.L {
     void promptName(String title, final Consumer<String> done) { promptName(title, "", done); }
 
     void promptName(String title, String initial, final Consumer<String> done) {
-        final EditText et = new EditText(this);
-        et.setSingleLine(true);
-        et.setHint("Name");
-        et.setText(initial);
-        et.setSelectAllOnFocus(true);
-        FrameLayout wrap = new FrameLayout(this);
-        wrap.setPadding(Ui.dp(this, 20), Ui.dp(this, 8), Ui.dp(this, 20), 0);
-        wrap.addView(et, new FrameLayout.LayoutParams(Ui.MATCH, Ui.WRAP));
-        AlertDialog d = new AlertDialog.Builder(this, Ui.dialogTheme())
-                .setTitle(title).setView(wrap)
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("OK", (dd, w) -> {
-                    String n = et.getText().toString().trim();
-                    if (!n.isEmpty()) done.accept(n);
-                }).create();
-        d.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE);
-        d.show();
+        Ui.prompt(this, title, initial, "Name", title.startsWith("New") ? "Create" : "OK", done);
     }
 
-    void confirm(String title, String msg, String ok, final Runnable r) {
-        new AlertDialog.Builder(this, Ui.dialogTheme())
-                .setTitle(title).setMessage(msg)
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton(ok, (d, w) -> r.run())
-                .show();
-    }
+    void confirm(String title, String msg, String ok, final Runnable r) { Ui.confirm(this, title, msg, ok, false, r); }
+
+    void confirmDanger(String title, String msg, String ok, final Runnable r) { Ui.confirm(this, title, msg, ok, true, r); }
 
     // ---------- rename ----------
     static String ext(String fileName) {
@@ -559,12 +649,10 @@ public class MainActivity extends Activity implements Engine.L {
     void confirmDeleteMany(final List<Media> ms, final Runnable after) {
         if (ms.isEmpty()) return;
         boolean one = ms.size() == 1;
-        new AlertDialog.Builder(this, Ui.dialogTheme())
-                .setTitle(one ? (ms.get(0).video ? "Delete video?" : "Delete audio?") : "Delete " + ms.size() + " items?")
-                .setMessage(one ? "\"" + ms.get(0).title + "\" will be permanently removed from your device."
-                        : "These " + ms.size() + " items will be permanently removed from your device.")
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Delete", (d, w) -> deleteNow(ms, after)).show();
+        confirmDanger(one ? (ms.get(0).video ? "Delete video?" : "Delete audio?") : "Delete " + ms.size() + " items?",
+                one ? "\"" + ms.get(0).title + "\" will be permanently removed from your device."
+                        : "These " + ms.size() + " items will be permanently removed from your device.",
+                "Delete", () -> deleteNow(ms, after));
     }
 
     void deleteNow(List<Media> ms, Runnable after) {
@@ -612,11 +700,80 @@ public class MainActivity extends Activity implements Engine.L {
             }
             pendingDel = new ArrayList<>();
             pendingDelAfter = null;
+        } else if (req == 80) {
+            if (res == RESULT_OK && data != null && data.getData() != null) writeBackup(data.getData());
+        } else if (req == 81) {
+            if (res == RESULT_OK && data != null && data.getData() != null) askRestore(data.getData());
         } else if (req == 78) {
             if (res == RESULT_OK && pendingRen != null) applyRename(pendingRen, pendingRenName, true);
             pendingRen = null;
             pendingRenName = null;
         }
+    }
+
+    // ---------- spectrum toggles ----------
+    void specToggled(final String key) {
+        if (store.bool(key, false) && !engine.spec.permitted()) {
+            Ui.confirm(this, "Allow audio access?",
+                    "Android only lets an app read the audio spectrum with the Microphone permission. Nothing is recorded, "
+                            + "the app only looks at the sound it is playing itself.", "Continue", false,
+                    () -> { pendingSpecKey = key; requestPermissions(new String[]{"android.permission.RECORD_AUDIO"}, 2); },
+                    () -> { store.setBool(key, false); rebuildUi(); });
+            return;
+        }
+        engine.spec.update();
+        engine.fire(); // redraw rows + player with the new setting
+    }
+
+    // ---------- backup / restore (system file picker, so no storage permission is needed) ----------
+    Uri restoreUri;
+
+    void createBackup() {
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("application/zip");
+        i.putExtra(Intent.EXTRA_TITLE, Backup.fileName());
+        try { startActivityForResult(i, 80); } catch (Exception e) { toast("No file picker available"); }
+    }
+
+    void pickBackup() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/zip", "application/x-zip-compressed", "application/octet-stream"});
+        try { startActivityForResult(i, 81); } catch (Exception e) { toast("No file picker available"); }
+    }
+
+    String displayName(Uri u) {
+        try (Cursor c = getContentResolver().query(u, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst() && !c.isNull(0)) return c.getString(0);
+        } catch (Exception e) { }
+        return "this backup";
+    }
+
+    void writeBackup(Uri u) {
+        try (OutputStream os = getContentResolver().openOutputStream(u, "wt")) {
+            Backup.create(store, byKey, os);
+            Ui.notice(this, "Backup created", "Saved as " + displayName(u) + "\n\n" + store.list("fav").size() + " favorites, "
+                    + store.playlists(false).size() + " audio playlists, " + store.playlists(true).size() + " video playlists.");
+        } catch (Exception e) {
+            Ui.notice(this, "Backup failed", "The backup could not be written. Try another location.");
+        }
+    }
+
+    void askRestore(final Uri u) {
+        confirm("Restore backup?", "Your current favorites and playlists will be replaced by the ones in " + displayName(u) + ".",
+                "Restore", () -> {
+                    try (InputStream is = getContentResolver().openInputStream(u)) {
+                        Backup.Result r = Backup.restore(store, byKey, is);
+                        refreshAll();
+                        player.changed();
+                        Ui.notice(this, "Backup restored", r.favorites + " favorites, " + r.audioPlaylists + " audio playlists, "
+                                + r.videoPlaylists + " video playlists.");
+                    } catch (Exception e) {
+                        Ui.notice(this, "Restore failed", "That file is not a Vidsic backup, or it is damaged. Nothing was changed.");
+                    }
+                });
     }
 
     // ---------- settings (grouped in cards) ----------
@@ -736,6 +893,8 @@ public class MainActivity extends Activity implements Engine.L {
         add(card, stats);
         refreshStats();
         action(card, R.drawable.ic_folder, "Rescan library", () -> { loadMedia(); toast("Scanning..."); });
+        toggle(card, "Auto rescan library", "Rescan when you open the app and when files are added, removed or renamed",
+                "auto_rescan", false, () -> { if (store.bool("auto_rescan", false)) loadMedia(); });
         action(card, R.drawable.ic_settings, "Grant media access", () -> {
             requestPermissions(perms(), 1);
             try {
@@ -764,6 +923,17 @@ public class MainActivity extends Activity implements Engine.L {
                     refreshAll();
                     toast("Searches cleared");
                 }));
+
+        card = group(col, "BACKUP");
+        action(card, R.drawable.ic_backup, "Create Backup", this::createBackup);
+        action(card, R.drawable.ic_restore, "Restore Backup", this::pickBackup);
+        note(card, "A vidsic_backup zip with your favorites and your audio and video playlists (separate files).");
+
+        card = group(col, "MISC");
+        toggle(card, "Audio Spectrum Sync", "The bars next to the playing item follow the real audio instead of a preset animation",
+                "spec_sync", false, () -> specToggled("spec_sync"));
+        toggle(card, "Audio Player Spectrum", "In the player, show a live audio spectrum instead of the thumbnail / music note",
+                "spec_player", false, () -> specToggled("spec_player"));
 
         card = group(col, "ABOUT");
         LinearLayout about = new LinearLayout(this);

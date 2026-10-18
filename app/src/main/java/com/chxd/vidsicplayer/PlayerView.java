@@ -31,6 +31,7 @@ class PlayerView extends FrameLayout implements Engine.L {
     final ImageView unlock;
     boolean drag, controls = true, locked, lockIconShown;
     String artKey = "";
+    Ui.SpectrumView spectrum; // "Audio Player Spectrum": replaces the thumbnail / note
 
     PlayerView(MainActivity act) {
         super(act);
@@ -253,11 +254,16 @@ class PlayerView extends FrameLayout implements Engine.L {
         boolean showVideo = m != null && m.video && !en.audioMode;
         sv.setVisibility(showVideo ? View.VISIBLE : View.GONE);
         artBox.setVisibility(showVideo ? View.GONE : View.VISIBLE);
-        String k = m == null ? "" : m.key() + (m.video ? "v" : "a");
+        boolean specOn = a.store.bool("spec_player", false);
+        String k = m == null ? "" : m.key() + (m.video ? "v" : "a") + (specOn ? "s" : "");
         if (!k.equals(artKey)) {
             artKey = k;
             artBox.removeAllViews();
-            if (m != null) {
+            spectrum = null;
+            if (m != null && specOn) {
+                spectrum = new Ui.SpectrumView(a);
+                artBox.addView(spectrum, new FrameLayout.LayoutParams(Ui.MATCH, Ui.MATCH));
+            } else if (m != null) {
                 ImageView ic = new ImageView(a);
                 ic.setImageResource(m.video ? R.drawable.ic_movie : R.drawable.ic_music);
                 ic.setColorFilter(Ui.SUB);
@@ -270,6 +276,7 @@ class PlayerView extends FrameLayout implements Engine.L {
                 Ui.thumb(a, m, t, 600);
             }
         }
+        if (spectrum != null) spectrum.invalidate();
         play.setImageResource(en.isPlaying() ? R.drawable.ic_pause : R.drawable.ic_play);
         shuf.setColorFilter(en.shuffle ? Ui.ACC : Ui.SUB);
         rep.setImageResource(en.repeat == 2 ? R.drawable.ic_repeat_one : R.drawable.ic_repeat);

@@ -52,6 +52,7 @@ class Engine {
     final ArrayList<L> ls = new ArrayList<>();   // UI listeners
     final ArrayList<L> soft = new ArrayList<>(); // notification service
     final Random rnd = new Random();
+    final Spectrum spec = new Spectrum(this);
 
     // notification / lock-screen artwork
     Bitmap art;
@@ -96,6 +97,7 @@ class Engine {
 
     void fire() {
         syncSession();
+        spec.update();
         for (L l : new ArrayList<>(ls)) l.changed();
         for (L l : new ArrayList<>(soft)) l.changed();
     }
@@ -249,6 +251,7 @@ class Engine {
     }
 
     void free() {
+        spec.release();
         if (mp != null) { try { mp.release(); } catch (Exception e) { } mp = null; }
         prepared = false;
     }
@@ -344,6 +347,30 @@ class Engine {
         if (queue.isEmpty()) { queue.add(m); playAt(0); return; }
         queue.add(idx + 1, m);
         fire();
+    }
+
+    /** Drag & drop in the play queue. Does not restart anything; keeps idx pointing at the playing item. */
+    void moveQueue(int from, int to) {
+        if (from == to || from < 0 || to < 0 || from >= queue.size() || to >= queue.size()) return;
+        Media m = queue.remove(from);
+        queue.add(to, m);
+        if (idx == from) idx = to;
+        else if (from < idx && to >= idx) idx--;
+        else if (from > idx && to <= idx) idx++;
+    }
+
+    /** Removes one queue entry. Removing the playing one moves on to the entry that took its place. */
+    void removeAt(int i) {
+        if (i < 0 || i >= queue.size()) return;
+        if (i != idx) {
+            queue.remove(i);
+            if (i < idx) idx--;
+            fire();
+            return;
+        }
+        queue.remove(i);
+        if (queue.isEmpty()) { free(); idx = -1; fire(); return; }
+        playAt(i < queue.size() ? i : 0);
     }
 
     void remove(String key) {

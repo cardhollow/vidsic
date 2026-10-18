@@ -550,7 +550,9 @@ class MediaPage {
                     g.icon = R.drawable.ic_playlist;
                     g.click = () -> { openPl = n; refresh(); };
                     g.more = () -> new Ui.Sheet(a, n, "Playlist")
-                            .item(R.drawable.ic_delete, "Delete playlist", Ui.RED, () -> { s.deletePlaylist(video, n); refresh(); }).show();
+                            .item(R.drawable.ic_delete, "Delete playlist", Ui.RED, () ->
+                                    a.confirmDanger("Delete playlist?", "\"" + n + "\" will be deleted. The " + (video ? "videos" : "audios") + " in it stay on your device.",
+                                            "Delete", () -> { s.deletePlaylist(video, n); refresh(); })).show();
                     gs.add(g);
                 }
                 addGroups(gs);
