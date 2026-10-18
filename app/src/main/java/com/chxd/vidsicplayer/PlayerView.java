@@ -5,8 +5,8 @@ import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
-import android.view.SurfaceHolder;
-import android.view.SurfaceView;
+import android.graphics.SurfaceTexture;
+import android.view.TextureView;
 import android.view.View;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -25,7 +25,7 @@ class PlayerView extends FrameLayout implements Engine.L {
     final ImageView play, shuf, rep, fav;
     final TextView title, sub, cur, max;
     final SeekBar sb;
-    final SurfaceView sv;
+    final TextureView sv;
     final FrameLayout area, artBox;
     final LinearLayout top, bottom;
     final ImageView unlock;
@@ -48,11 +48,13 @@ class PlayerView extends FrameLayout implements Engine.L {
         artBox.setBackground(Ui.shape(Ui.SURF2, 24, a));
         artBox.setClipToOutline(true);
         area.addView(artBox, new FrameLayout.LayoutParams(Ui.dp(a, 240), Ui.dp(a, 240), Gravity.CENTER));
-        sv = new SurfaceView(a);
-        sv.getHolder().addCallback(new SurfaceHolder.Callback() {
-            public void surfaceCreated(SurfaceHolder h) { en.setHolder(h); }
-            public void surfaceChanged(SurfaceHolder h, int f, int w, int hh) { en.setHolder(h); }
-            public void surfaceDestroyed(SurfaceHolder h) { en.setHolder(null); }
+        sv = new TextureView(a);
+        sv.setSurfaceTexture(en.videoTexture()); // the engine's surface: playback never notices this view coming and going
+        sv.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
+            public void onSurfaceTextureAvailable(SurfaceTexture t, int w, int h) { }
+            public void onSurfaceTextureSizeChanged(SurfaceTexture t, int w, int h) { }
+            public boolean onSurfaceTextureDestroyed(SurfaceTexture t) { return false; } // keep it, the engine owns it
+            public void onSurfaceTextureUpdated(SurfaceTexture t) { }
         });
         area.addView(sv, new FrameLayout.LayoutParams(Ui.MATCH, Ui.dp(a, 200), Gravity.CENTER));
         sv.setVisibility(View.GONE);

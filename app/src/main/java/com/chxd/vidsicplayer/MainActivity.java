@@ -155,17 +155,16 @@ public class MainActivity extends Activity implements Engine.L {
     @Override protected void onResume() {
         super.onResume();
         h.post(ticker);
-        engine.spec.uiVisible = true;
-        engine.spec.update();
-        if (store.bool("auto_rescan", false) && SystemClock.uptimeMillis() - lastLoad > 3000) loadMedia();
+        engine.spec.setUiVisible(true);
+        if (loading) { if (stats != null) refreshStats(); }
+        else if (store.bool("auto_rescan", false) && SystemClock.uptimeMillis() - lastLoad > 30000) loadMedia();
         else if (wantHidden() && !scanned && Environment.isExternalStorageManager()) loadMedia();
         else if (stats != null) refreshStats();
     }
     @Override protected void onPause() {
         super.onPause();
         h.removeCallbacks(ticker);
-        engine.spec.uiVisible = false; // no point reading the audio while nobody can see it
-        engine.spec.update();
+        engine.spec.setUiVisible(false);
     }
 
     @Override
@@ -222,6 +221,8 @@ public class MainActivity extends Activity implements Engine.L {
         loading = true;
         lastLoad = SystemClock.uptimeMillis();
         new Thread(() -> {
+            // library scanning must never compete with the audio decoder
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
             try { loadNow(); } catch (Throwable t) { h.post(() -> loading = false); }
         }).start();
     }

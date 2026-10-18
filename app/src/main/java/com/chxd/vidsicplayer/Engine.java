@@ -18,7 +18,8 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
-import android.view.SurfaceHolder;
+import android.graphics.SurfaceTexture;
+import android.view.Surface;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -48,7 +49,7 @@ class Engine {
     final ArrayList<Media> queue = new ArrayList<>();
     int idx = -1, repeat = 0, vw, vh; // repeat: 0 off, 1 all, 2 one
     boolean audioMode, shuffle, prepared;
-    SurfaceHolder holder;
+    boolean surfaceOn; // mp currently has the video surface
     final ArrayList<L> ls = new ArrayList<>();   // UI listeners
     final ArrayList<L> soft = new ArrayList<>(); // notification service
     final Random rnd = new Random();
@@ -237,7 +238,7 @@ class Engine {
                     .setUsage(AudioAttributes.USAGE_MEDIA).build());
             p.setWakeMode(ctx, PowerManager.PARTIAL_WAKE_LOCK);
             p.setDataSource(ctx, m.uri);
-            if (m.video && !audioMode && holder != null && holder.getSurface().isValid()) p.setDisplay(holder);
+            if (m.video && !audioMode) { p.setSurface(videoSurface()); surfaceOn = true; }
             p.setOnVideoSizeChangedListener((x, w, h) -> { if (x == mp) { vw = w; vh = h; fire(); } });
             p.setOnPreparedListener(x -> {
                 if (x == mp) { prepared = true; focus(); x.start(); ensureService(); fire(); }
@@ -252,6 +253,7 @@ class Engine {
 
     void free() {
         spec.release();
+        surfaceOn = false;
         if (mp != null) { try { mp.release(); } catch (Exception e) { } mp = null; }
         prepared = false;
     }
@@ -387,21 +389,32 @@ class Engine {
         try {
             if (mp != null) {
                 Media m = cur();
-                boolean show = m != null && m.video && !b && holder != null && holder.getSurface().isValid();
-                mp.setDisplay(show ? holder : null);
+                boolean show = m != null && m.video && !b;
+                if (show != surfaceOn) { mp.setSurface(show ? videoSurface() : null); surfaceOn = show; }
             }
         } catch (Exception e) { }
         fire();
     }
 
-    void setHolder(SurfaceHolder h) {
-        holder = h;
-        try {
-            Media m = cur();
-            if (mp != null) {
-                if (h != null && m != null && m.video && !audioMode && h.getSurface().isValid()) mp.setDisplay(h);
-                else if (h == null) mp.setDisplay(null);
-            }
-        } catch (Exception e) { }
+    // ---------- video output ----------
+    // The video is decoded into a Surface that belongs to the ENGINE and lives as long as the process does;
+    // the player screen just shows it (TextureView). The MediaPlayer's display is therefore set once when a
+    // video starts and never touched again when the screen closes / reopens. Changing the display of a
+    // playing video makes Android flush the audio and re-seek the video, which is the pause / pulsing you
+    // heard every time the app was left and entered again.
+    SurfaceTexture vtex;
+    Surface vsurf;
+
+    Surface videoSurface() {
+        if (vsurf == null) {
+            vtex = new SurfaceTexture(false); // detached, so any TextureView can adopt it
+            vsurf = new Surface(vtex);
+        }
+        return vsurf;
+    }
+
+    SurfaceTexture videoTexture() {
+        videoSurface();
+        return vtex;
     }
 }

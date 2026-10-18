@@ -16,7 +16,17 @@ class Spectrum {
     Visualizer viz;
     int session = -1;
     boolean failed;
-    boolean uiVisible; // only read the audio while the app is on screen
+    boolean uiVisible = true, suspended, enabled;
+    // Creating / releasing a Visualizer makes the audio glitch on many devices, so it is NOT done on every
+    // screen-off / app-exit: it is only let go after the app has been out of sight for a minute.
+    final Runnable letGo = () -> { if (!uiVisible) { suspended = true; release(); } };
+
+    void setUiVisible(boolean v) {
+        uiVisible = v;
+        en.handler.removeCallbacks(letGo);
+        if (v) { if (suspended) { suspended = false; update(); } }
+        else en.handler.postDelayed(letGo, 60000);
+    }
     final float[] bands = new float[BANDS];
     byte[] fft;
     long last;
@@ -36,7 +46,7 @@ class Spectrum {
 
     /** Called whenever the engine state changes: (re)attaches to the current player, or lets go. */
     void update() {
-        if (!uiVisible || !wanted() || !permitted() || en.mp == null || !en.prepared) { release(); return; }
+        if (suspended || !wanted() || !permitted() || en.mp == null || !en.prepared) { release(); return; }
         int id;
         try { id = en.mp.getAudioSessionId(); } catch (Exception e) { release(); return; }
         if (viz == null || id != session) {
@@ -47,6 +57,7 @@ class Spectrum {
                 v.setCaptureSize(Visualizer.getCaptureSizeRange()[1]);
                 v.setEnabled(true);
                 viz = v;
+                enabled = true;
                 session = id;
                 failed = false;
                 fft = new byte[v.getCaptureSize()];
@@ -56,7 +67,10 @@ class Spectrum {
                 failed = true;
             }
         }
-        try { if (viz != null) viz.setEnabled(en.isPlaying()); } catch (Exception e) { }
+        try {
+            boolean on = en.isPlaying();
+            if (viz != null && on != enabled) { viz.setEnabled(on); enabled = on; }
+        } catch (Exception e) { }
     }
 
     void release() {

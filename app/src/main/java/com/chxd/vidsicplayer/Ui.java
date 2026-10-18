@@ -50,7 +50,10 @@ final class Ui {
     static final int RED = 0xFFFF5C5C;
     static final int MATCH = ViewGroup.LayoutParams.MATCH_PARENT, WRAP = ViewGroup.LayoutParams.WRAP_CONTENT;
     static final LruCache<String, Bitmap> CACHE = new LruCache<>(80);
-    static final ExecutorService EX = Executors.newFixedThreadPool(2);
+    static final ExecutorService EX = Executors.newFixedThreadPool(2, r -> new Thread(() -> {
+        android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
+        r.run();
+    }));
     static final Handler H = new Handler(Looper.getMainLooper());
 
     static double lum(int c) { return (0.299 * Color.red(c) + 0.587 * Color.green(c) + 0.114 * Color.blue(c)) / 255.0; }
