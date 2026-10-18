@@ -12,16 +12,16 @@ software and other kinds of works.
 
   The licenses for most software and other practical works are designed
 to take away your freedom to share and change the works.  By contrast,
-the GNU General Public License is intended to guarantee your freedom to
-share and change all versions of a program--to make sure it remains free
+the GNU General Public License is intended to guarantee your freedom
+to share and change all versions of a program--to make sure it remains free
 software for all its users.  We, the Free Software Foundation, use the
 GNU General Public License for most of our software; it applies also to
 any other work released this way by its authors.  You can apply it to
 your programs, too.
 
   When we speak of free software, we are referring to freedom, not
-price.  Our General Public Licenses are designed to make sure that you
-have the freedom to distribute copies of free software (and charge for
+price.  Our General Public Licenses are designed to make sure that
+you have the freedom to distribute copies of free software (and charge for
 them if you wish), that you receive source code or can get it if you
 want it, that you can change the software or use pieces of it in new
 free programs, and that you know you can do these things.
@@ -34,8 +34,8 @@ you modify it: responsibilities to respect the freedom of others.
   For example, if you distribute copies of such a program, whether
 gratis or for a fee, you must pass on to the recipients the same
 freedoms that you received.  You must make sure that they, too, receive
-or can get the source code.  And you must show them these terms so they
-know their rights.
+or can get the source code.  And you must show them these terms so
+they know their rights.
 
   Developers that use the GNU GPL protect your rights with two steps:
 (1) assert copyright on the software, and (2) offer you this License
@@ -60,8 +60,8 @@ of the GPL, as needed to protect the freedom of users.
 
   Finally, every program is threatened constantly by software patents.
 States should not allow patents to restrict development and use of
-software on general-purpose computers, but in those that do, we wish to
-avoid the special danger that patents applied to a free program could
+software on general-purpose computers, but in those that do, we wish
+to avoid the special danger that patents applied to a free program could
 make it effectively proprietary.  To prevent this, the GPL assures that
 patents cannot be used to render the program non-free.
 
@@ -117,8 +117,8 @@ form of a work.
 
   A "Standard Interface" means an interface that either is an official
 standard defined by a recognized standards body, or, in the case of
-interfaces specified for a particular programming language, one that
-is widely used among developers working in that language.
+interfaces specified for a particular programming language, one that is
+widely used among developers working in that language.
 
   The "System Libraries" of an executable work include anything, other
 than the work as a whole, that (a) is included in the normal form of
@@ -301,7 +301,7 @@ into a dwelling.  In determining whether a product is a consumer product,
 doubtful cases shall be resolved in favor of coverage.  For a particular
 product received by a particular user, "normally used" refers to a
 typical or common use of that class of product, regardless of the status
-of the particular user or of the way in which the particular user
+of the particular user or of the way in which that particular user
 actually uses, or expects or is expected to use, the product.  A product
 is a consumer product regardless of whether the product has substantial
 commercial, industrial or non-consumer uses, unless such uses represent
@@ -315,7 +315,7 @@ suffice to ensure that the continued functioning of the modified object
 code is in no case prevented or interfered with solely because
 modification has been made.
 
-  If you convey an object code work under this section in, or with, or
+  If you convey an object code work under this section, in or with, or
 specifically for use in, a User Product, and the conveying occurs as
 part of a transaction in which the right of possession and use of the
 User Product is transferred to the recipient in perpetuity or for a
@@ -493,8 +493,8 @@ propagate the contents of its contributor version.
 agreement or commitment, however denominated, not to enforce a patent
 (such as an express permission to practice a patent or covenant not to
 sue for patent infringement).  To "grant" such a patent license to a
-party means to make such an agreement or commitment not to enforce a
-patent against the party.
+party means to make such an agreement or commitment not to enforce
+a patent against the party.
 
   If you convey a covered work, knowingly relying on a patent license,
 and the Corresponding Source of the work is not available for anyone
@@ -628,11 +628,11 @@ free software which everyone can redistribute and change under these terms.
 
   To do so, attach the following notices to the program.  It is safest
 to attach them to the start of each source file to most effectively
-state the exclusion of warranty; and each file should have at least
-the "copyright" line and a pointer to where the full notice is found.
+state the exclusion of warranty; and each file should have at least the
+"copyright" line and a pointer to where the full notice is found.
 
-    \<one line to give the program's name and a brief idea of what it does.\>
-    Copyright (C) <year>  <name of author>
+    Vidsic Player is an Android audio and video media player.
+    Copyright (C) 2026 CardHollow
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -652,7 +652,7 @@ Also add information on how to contact you by electronic and paper mail.
   If the program does terminal interaction, make it output a short
 notice like this when it starts in an interactive mode:
 
-    \<program\>  Copyright (C) \<year\>  \<name of author\>
+    Vidsic Player  Copyright (C) 2026 CardHollow
     This program comes with ABSOLUTELY NO WARRANTY; for details type `show w'.
     This is free software, and you are welcome to redistribute it
     under certain conditions; type `show c' for details.
