@@ -68,12 +68,18 @@ class VibeView extends View {
     float fe, fb, fc = .3f, ff, fluxPeak = .02f, bassAvg, bpm, beat, flash, rot, hueShift;
     long lastBeat;
     boolean beatNow;
+    // left / right: how much each speaker drives each band (1 = full). Both 1 when the sound is centred or not analysed (yet).
+    final float[] gl = new float[N], gr = new float[N];
+    StereoMap map;
+    String mapKey = "";
     float ref, focusY; // set by the player: size of the artwork square and the y of its centre (0 = use own size / middle)
 
     VibeView(Context c) {
         super(c);
         en = Engine.get(c);
         System.arraycopy(L[mood], 0, P, 0, 12);
+        Arrays.fill(gl, 1f);
+        Arrays.fill(gr, 1f);
         stroke.setStyle(Paint.Style.STROKE);
         stroke.setStrokeCap(Paint.Cap.ROUND);
         stroke.setXfermode(ADD);
@@ -108,6 +114,36 @@ class VibeView extends View {
             default: r = c; g = 0; bl = x;
         }
         return Color.argb((int) (clamp(a, 0, 1) * 255), (int) ((r + m) * 255), (int) ((g + m) * 255), (int) ((bl + m) * 255));
+    }
+
+    /** Starts / switches the background left-right analysis for the playing file, and eases gl / gr toward it. */
+    void updatePan(boolean real) {
+        Media m = en.cur();
+        String key = m == null ? "" : m.key();
+        if (!key.equals(mapKey)) {
+            stopMap();
+            mapKey = key;
+            if (real && m != null && m.uri != null) { map = new StereoMap(getContext(), m.uri); map.start(); }
+            else mapKey = "";
+        }
+        int pos = en.pos();
+        for (int i = 0; i < N; i++) {
+            float rs = map != null ? map.right(pos, i) : -1f, tl = 1f, tr = 1f;
+            if (rs >= 0) { tl = Math.min(1f, 2f * (1f - rs)); tr = Math.min(1f, 2f * rs); }
+            gl[i] += (tl - gl[i]) * .25f;
+            gr[i] += (tr - gr[i]) * .25f;
+        }
+    }
+
+    void stopMap() {
+        if (map != null) { map.cancel(); map = null; }
+        mapKey = "";
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        stopMap();
+        super.onDetachedFromWindow();
     }
 
     /** Reads the engine's spectrum into b[] (real FFT when available, a simulated animation otherwise, silence when paused). */
@@ -214,6 +250,7 @@ class VibeView extends View {
         double t = SystemClock.uptimeMillis() / 1000.0;
         fetch(playing, real, t);
         if (real) analyse();
+        updatePan(real);
 
         // ease the look toward the current mood
         float[] M = L[mood];
@@ -255,8 +292,12 @@ class VibeView extends View {
             float f = (float) Math.pow(m / (BN / 2f), 1.8) * (N - 1);
             int i0 = (int) f, i1 = Math.min(N - 1, i0 + 1);
             float fr = f - i0, v = b[i0] * (1 - fr) + b[i1] * fr;
-            float len = (v * v * .4f + v * .9f) * R * P[6] * (1 + beat * .4f) + 2 * k;
             float a = i / (float) BN * 6.2832f + rot, c = (float) Math.cos(a), s = (float) Math.sin(a);
+            // left side of the screen listens to the left speaker, right side to the right one (smooth blend near the middle)
+            float tt = clamp((c + .3f) / .6f, 0, 1), wr = tt * tt * (3 - 2 * tt);
+            int bi = Math.min(N - 1, Math.round(f));
+            v *= gl[bi] * (1 - wr) + gr[bi] * wr;
+            float len = (v * v * .4f + v * .9f) * R * P[6] * (1 + beat * .4f) + 2 * k;
             float r0 = R * (1 + bassV * .18f);
             float jag = (P[8] > 1 && i % 2 == 0) ? .7f : 1f;
             float hh = hue + m / (BN / 2f) * P[1];

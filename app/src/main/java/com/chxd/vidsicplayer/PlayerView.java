@@ -43,7 +43,7 @@ class PlayerView extends FrameLayout implements Engine.L {
     final TextView speedChip, ccChip, syncChip, capView, holdTag, fbL, fbR, sleepHint;
     final FrameLayout sleepLayer;
     final GestureDetector gd, sleepGd;
-    boolean drag, controls = true, locked, lockIconShown, holding, prevControls, sleeping, capRun;
+    boolean pip, drag, controls = true, locked, lockIconShown, holding, prevControls, sleeping, capRun;
     long skipAt;
     int skipTo, skipSum;
     Captions caps;
@@ -94,14 +94,8 @@ class PlayerView extends FrameLayout implements Engine.L {
         addView(area, new FrameLayout.LayoutParams(Ui.MATCH, Ui.MATCH));
 
         // captions: above the picture, below the controls
-        capView = new TextView(a);
-        capView.setTextColor(0xFFFFFFFF);
-        capView.setTextSize(17);
-        capView.setGravity(Gravity.CENTER);
-        capView.setLineSpacing(0, 1.1f);
-        capView.setMaxLines(4);
-        capView.setPadding(Ui.dp(a, 12), Ui.dp(a, 5), Ui.dp(a, 12), Ui.dp(a, 6));
-        capView.setBackground(Ui.shape(0xB3000000, 8, a));
+        capView = new CapSettings.CapText(a);
+        CapSettings.apply(capView, a.store.p, a); // size, colors, edge, background... from Caption settings
         capView.setVisibility(View.GONE);
         FrameLayout.LayoutParams cvp = new FrameLayout.LayoutParams(Ui.WRAP, Ui.WRAP, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         cvp.setMargins(Ui.dp(a, 24), 0, Ui.dp(a, 24), Ui.dp(a, 40));
@@ -121,6 +115,9 @@ class PlayerView extends FrameLayout implements Engine.L {
         ImageView sleep = Ui.btn(a, R.drawable.ic_sleep, Ui.TXT, 24, 10);
         sleep.setOnClickListener(v -> enterSleep());
         top.addView(sleep);
+        ImageView pipBtn = Ui.btn(a, R.drawable.ic_pip, Ui.TXT, 24, 10);
+        pipBtn.setOnClickListener(v -> a.enterPip());
+        top.addView(pipBtn);
         ImageView lock = Ui.btn(a, R.drawable.ic_lock, Ui.TXT, 24, 10);
         lock.setOnClickListener(v -> lock());
         top.addView(lock);
@@ -536,8 +533,10 @@ class PlayerView extends FrameLayout implements Engine.L {
         final Media m = en.cur();
         if (m == null) return;
         if (caps == null) {
-            Ui.confirm(a, "Add captions", "Import a subtitle file (.srt, .vtt, .ttml, .ass, .sbv, .lrc ...) for \"" + m.title
-                    + "\". It is saved inside the app and included in your backups.", "Import", false, () -> a.pickCaptions(m));
+            Ui.Sheet sn = new Ui.Sheet(a, "Captions", m.title);
+            sn.item(R.drawable.ic_add, "Import captions (.srt, .vtt, .ass ...)", Ui.TXT, () -> a.pickCaptions(m));
+            sn.item(R.drawable.ic_settings, "Caption settings", Ui.TXT, this::showCapSettings);
+            sn.show();
             return;
         }
         final boolean on = a.store.bool("caps_on", true);
@@ -550,6 +549,7 @@ class PlayerView extends FrameLayout implements Engine.L {
             if (on) capView.setVisibility(View.GONE);
         });
         sh.item(R.drawable.ic_add, "Import other captions", Ui.TXT, () -> a.pickCaptions(m));
+        sh.item(R.drawable.ic_settings, "Caption settings", Ui.TXT, this::showCapSettings);
         sh.item(R.drawable.ic_delete, "Remove captions", Ui.RED, () -> {
             a.store.deleteCaps(m.key());
             capsChanged();
@@ -585,7 +585,7 @@ class PlayerView extends FrameLayout implements Engine.L {
                 capView.setVisibility(View.GONE);
                 return;
             }
-            String t = caps.at(en.pos());
+            String t = caps.at(en.pos() - a.store.p.getInt("cc_delay", 0));
             if (t == null ? capShown != null : !t.equals(capShown)) {
                 capShown = t;
                 if (t == null) capView.setVisibility(View.GONE);
@@ -598,9 +598,41 @@ class PlayerView extends FrameLayout implements Engine.L {
 
     /** Captions sit just above the controls while those are shown, near the bottom edge otherwise. */
     void layoutCaps() {
+        android.content.SharedPreferences sp = a.store.p;
         FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) capView.getLayoutParams();
-        int mb = controls && !locked && !holding && !sleeping ? bottom.getHeight() + Ui.dp(a, 8) : Ui.dp(a, 40);
-        if (lp.bottomMargin != mb) { lp.bottomMargin = mb; capView.setLayoutParams(lp); }
+        int pos = sp.getInt("cc_pos", 2), off = Ui.dp(a, sp.getInt("cc_off", 0));
+        boolean chrome = controls && !locked && !holding && !sleeping && !pip;
+        int g, mt = 0, mb = 0;
+        if (pos == 0) { g = Gravity.TOP | Gravity.CENTER_HORIZONTAL; mt = (chrome ? top.getHeight() + Ui.dp(a, 8) : Ui.dp(a, 40)) + off; }
+        else if (pos == 1) { g = Gravity.CENTER; mt = off; }
+        else { g = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL; mb = (chrome ? bottom.getHeight() + Ui.dp(a, 8) : Ui.dp(a, 40)) + off; }
+        if (pip) { mt = pos == 0 ? Ui.dp(a, 8) : 0; mb = pos == 2 ? Ui.dp(a, 8) : 0; }
+        int side = Ui.dp(a, pip ? 6 : 24);
+        if (lp.gravity != g || lp.topMargin != mt || lp.bottomMargin != mb || lp.leftMargin != side) {
+            lp.gravity = g;
+            lp.setMargins(side, mt, side, mb);
+            capView.setLayoutParams(lp);
+        }
+        if (getWidth() > 0) {
+            int maxW = Math.max(Ui.dp(a, 80), (getWidth() - 2 * side) * sp.getInt("cc_wid", 100) / 100);
+            if (capView.getMaxWidth() != maxW) capView.setMaxWidth(maxW);
+        }
+    }
+
+    /** Caption settings changed: restyle the real captions right away. */
+    void applyCapStyle() {
+        CapSettings.apply(capView, a.store.p, a);
+        layoutCaps();
+    }
+
+    void showCapSettings() {
+        CapSettings.show(a, () -> {
+            applyCapStyle();
+            capShown = "";
+            updateChips();
+            startCapLoop();
+            if (!a.store.bool("caps_on", true)) capView.setVisibility(View.GONE);
+        });
     }
 
     GradientDrawable scrim(GradientDrawable.Orientation o) {
@@ -642,8 +674,25 @@ class PlayerView extends FrameLayout implements Engine.L {
         if (!locked) { controls = true; applyChrome(); }
     }
 
+    /** Picture-in-picture window: only the picture (or the visual) and the captions, no controls. */
+    void setPip(boolean on) {
+        pip = on;
+        if (on) {
+            exitSleep();
+            endHold();
+            top.animate().cancel();
+            bottom.animate().cancel();
+            top.setVisibility(View.GONE);
+            bottom.setVisibility(View.GONE);
+        } else {
+            applyChrome();
+        }
+        layoutCaps();
+        fit();
+    }
+
     void applyChrome() {
-        boolean show = controls && !locked;
+        boolean show = controls && !locked && !pip;
         fade(top, show);
         fade(bottom, show);
         fade(unlock, locked && lockIconShown);

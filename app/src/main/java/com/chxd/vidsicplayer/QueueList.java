@@ -20,6 +20,7 @@ class QueueList extends ListView {
 
     Cb cb;
     int drag = -1;
+    boolean noDrag; // select mode: the handle does nothing
     float y, grab;
     Bitmap shot;
     final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -45,7 +46,7 @@ class QueueList extends ListView {
 
     @Override
     public boolean onInterceptTouchEvent(MotionEvent e) {
-        if (e.getActionMasked() == MotionEvent.ACTION_DOWN && e.getX() < handleW) {
+        if (!noDrag && e.getActionMasked() == MotionEvent.ACTION_DOWN && e.getX() < handleW) {
             int pos = pointToPosition((int) e.getX(), (int) e.getY());
             if (pos != INVALID_POSITION && begin(pos, e.getY())) return true;
         }

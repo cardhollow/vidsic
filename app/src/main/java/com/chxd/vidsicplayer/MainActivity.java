@@ -67,7 +67,11 @@ public class MainActivity extends Activity implements Engine.L {
     String pendingRenName;
     FrameLayout queueLayer;       // play queue overlay (null when closed)
     BaseAdapter queueAd;
-    TextView queueHead;
+    TextView queueHead, queueHint;
+    QueueList queueList;
+    LinearLayout queueSelBar;
+    boolean qSelMode;                                         // "Select Item": tick queue rows, then act on them
+    final java.util.HashSet<Integer> qSel = new java.util.HashSet<>();
     String pendingSpecKey;
     Media pendingCapMedia;
     boolean loading, reloadQueued;
@@ -425,6 +429,28 @@ public class MainActivity extends Activity implements Engine.L {
         openPlayer();
     }
 
+    // ---------- picture in picture ----------
+    void enterPip() {
+        try {
+            Media m = engine.cur();
+            float ar = 1f; // audio / visualizer: a square window
+            if (m != null && m.video && !engine.audioMode && engine.vw > 0 && engine.vh > 0) ar = (float) engine.vw / engine.vh;
+            ar = Math.max(0.45f, Math.min(2.3f, ar));
+            android.app.PictureInPictureParams.Builder b = new android.app.PictureInPictureParams.Builder()
+                    .setAspectRatio(new android.util.Rational(Math.round(ar * 1000), 1000));
+            enterPictureInPictureMode(b.build());
+        } catch (Exception e) {
+            toast("Picture in picture is not available");
+        }
+    }
+
+    @Override
+    public void onPictureInPictureModeChanged(boolean isInPip, android.content.res.Configuration cfg) {
+        super.onPictureInPictureModeChanged(isInPip, cfg);
+        if (player != null) player.setPip(isInPip);
+        if (isInPip) hideQueue();
+    }
+
     // ---------- play queue (overlay above the bottom bars) ----------
     // Row: [3-bar drag handle][thumbnail][title / author][duration].
     // Hold the handle and drag to re-arrange. Tap a row for: play, remove from queue, add to playlist, favorite.
@@ -433,10 +459,15 @@ public class MainActivity extends Activity implements Engine.L {
         queueLayer = null;
         queueAd = null;
         queueHead = null;
+        queueHint = null;
+        queueList = null;
+        queueSelBar = null;
+        qSelMode = false;
+        qSel.clear();
     }
 
     void updateQueueHead() {
-        if (queueHead != null) queueHead.setText("Play queue (" + engine.queue.size() + ")");
+        if (queueHead != null) queueHead.setText(qSelMode ? qSel.size() + " selected" : "Play queue (" + engine.queue.size() + ")");
     }
 
     void showQueue() {
@@ -450,15 +481,28 @@ public class MainActivity extends Activity implements Engine.L {
         box.setClickable(true);
         box.setBackground(Ui.shape(Ui.SURF, 16, this));
         box.setElevation(Ui.dp(this, 12));
+        LinearLayout hrow = new LinearLayout(this);
+        hrow.setGravity(Gravity.CENTER_VERTICAL);
         queueHead = Ui.text(this, "", 16, Ui.TXT, true);
-        queueHead.setPadding(Ui.dp(this, 16), Ui.dp(this, 14), Ui.dp(this, 16), Ui.dp(this, 2));
-        box.addView(queueHead);
+        queueHead.setPadding(Ui.dp(this, 16), Ui.dp(this, 10), Ui.dp(this, 8), Ui.dp(this, 2));
+        hrow.addView(queueHead, new LinearLayout.LayoutParams(0, Ui.WRAP, 1));
+        ImageView qdots = Ui.btn(this, R.drawable.ic_more, Ui.TXT, 22, 8);
+        qdots.setOnClickListener(v -> queueMenu());
+        LinearLayout.LayoutParams qdp = new LinearLayout.LayoutParams(Ui.dp(this, 38), Ui.dp(this, 38));
+        qdp.setMargins(0, Ui.dp(this, 4), Ui.dp(this, 6), 0);
+        hrow.addView(qdots, qdp);
+        box.addView(hrow, new LinearLayout.LayoutParams(Ui.MATCH, Ui.WRAP));
         updateQueueHead();
-        TextView hint = Ui.text(this, "Hold \u2261 and drag to re-arrange. Tap an item for options.", 12, Ui.SUB, false);
+        TextView hint = Ui.text(this, "", 12, Ui.SUB, false);
         hint.setPadding(Ui.dp(this, 16), 0, Ui.dp(this, 16), Ui.dp(this, 8));
+        queueHint = hint;
         box.addView(hint);
+        queueSelBar = buildQueueSelBar();
+        box.addView(queueSelBar, new LinearLayout.LayoutParams(Ui.MATCH, Ui.WRAP));
+        refreshQueueMode();
 
         final QueueList lv = new QueueList(this);
+        queueList = lv;
         lv.setDivider(null);
         lv.setSelector(new android.graphics.drawable.ColorDrawable(0));
         lv.setOverScrollMode(View.OVER_SCROLL_NEVER);
@@ -474,9 +518,15 @@ public class MainActivity extends Activity implements Engine.L {
                 r.setGravity(Gravity.CENTER_VERTICAL);
                 r.setPadding(Ui.dp(c, 8), Ui.dp(c, 8), Ui.dp(c, 16), Ui.dp(c, 8));
                 r.setBackground(Ui.rip(0, 0, c));
-                ImageView grip = Ui.icon(c, R.drawable.ic_drag, Ui.SUB, 22);
-                grip.setPadding(Ui.dp(c, 8), Ui.dp(c, 8), Ui.dp(c, 8), Ui.dp(c, 8));
-                r.addView(grip, new LinearLayout.LayoutParams(Ui.dp(c, 38), Ui.dp(c, 38)));
+                if (qSelMode) {
+                    LinearLayout.LayoutParams ckp = new LinearLayout.LayoutParams(Ui.dp(c, 22), Ui.dp(c, 22));
+                    ckp.setMargins(Ui.dp(c, 8), 0, Ui.dp(c, 8), 0);
+                    r.addView(Ui.check(c, qSel.contains(i)), ckp);
+                } else {
+                    ImageView grip = Ui.icon(c, R.drawable.ic_drag, Ui.SUB, 22);
+                    grip.setPadding(Ui.dp(c, 8), Ui.dp(c, 8), Ui.dp(c, 8), Ui.dp(c, 8));
+                    r.addView(grip, new LinearLayout.LayoutParams(Ui.dp(c, 38), Ui.dp(c, 38)));
+                }
                 LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(Ui.dp(c, 40), Ui.dp(c, 40));
                 tp.setMargins(Ui.dp(c, 4), 0, 0, 0);
                 r.addView(Ui.thumbBox(c, m, 40), tp);
@@ -503,7 +553,12 @@ public class MainActivity extends Activity implements Engine.L {
             public void move(int from, int to) { engine.moveQueue(from, to); ad.notifyDataSetChanged(); }
             public void done() { ad.notifyDataSetChanged(); }
         };
-        lv.setOnItemClickListener((p, v, i, id) -> queueOptions(i));
+        lv.setOnItemClickListener((p, v, i, id) -> {
+            if (!qSelMode) { queueOptions(i); return; }
+            if (!qSel.remove(i)) qSel.add(i);
+            ad.notifyDataSetChanged();
+            updateQueueHead();
+        });
         int maxH = Math.min(Ui.dp(this, 56) * Math.max(1, engine.queue.size()), root.getHeight() * 50 / 100);
         box.addView(lv, new LinearLayout.LayoutParams(Ui.MATCH, maxH));
         // open on the item that is playing, centered in the list
@@ -517,6 +572,100 @@ public class MainActivity extends Activity implements Engine.L {
         bp.setMargins(Ui.dp(this, 8), 0, Ui.dp(this, 8), (pl ? 0 : nav.getHeight() + mini.getHeight()) + Ui.dp(this, 8));
         layer.addView(box, bp);
         root.addView(layer, new FrameLayout.LayoutParams(Ui.MATCH, Ui.MATCH));
+    }
+
+    /** The 3-dots menu in the queue header. */
+    void queueMenu() {
+        if (engine.queue.isEmpty()) { toast("The queue is empty"); return; }
+        Ui.Sheet sh = new Ui.Sheet(this, "Play queue", engine.queue.size() + " items");
+        sh.item(R.drawable.ic_playlist, "Add Queue Playlist", Ui.TXT, () -> addQueuePlaylist(new ArrayList<>(engine.queue)));
+        sh.item(R.drawable.ic_select, "Select Item", Ui.TXT, () -> { qSelMode = true; qSel.clear(); refreshQueueMode(); });
+        sh.item(R.drawable.ic_delete, "Clear Queue", Ui.RED, () ->
+                confirmDanger("Clear queue?", "All " + engine.queue.size() + " items are removed from the play queue and playback stops.", "Clear", () -> {
+                    engine.clearQueue();
+                    hideQueue();
+                }));
+        sh.show();
+    }
+
+    /** Audios and videos have separate playlists, so a mixed queue asks which part to add. */
+    void addQueuePlaylist(List<Media> src) {
+        if (src.isEmpty()) { toast("Nothing to add"); return; }
+        final List<Media> au = new ArrayList<>(), vi = new ArrayList<>();
+        for (Media m : src) (m.video ? vi : au).add(m);
+        if (vi.isEmpty()) pickPlaylist(au, null);
+        else if (au.isEmpty()) pickPlaylist(vi, null);
+        else {
+            Ui.Sheet sh = new Ui.Sheet(this, "Add Queue Playlist", "Audios and videos have separate playlists");
+            sh.item(R.drawable.ic_music, "Audios (" + au.size() + ")", Ui.TXT, () -> pickPlaylist(au, null));
+            sh.item(R.drawable.ic_movie, "Videos (" + vi.size() + ")", Ui.TXT, () -> pickPlaylist(vi, null));
+            sh.show();
+        }
+    }
+
+    List<Media> selectedQueueItems() {
+        List<Media> l = new ArrayList<>();
+        for (int i = 0; i < engine.queue.size(); i++) if (qSel.contains(i)) l.add(engine.queue.get(i));
+        return l;
+    }
+
+    /** Row of actions shown while "Select Item" is on: All / Add Queue Playlist / Clear Queue / Done. */
+    LinearLayout buildQueueSelBar() {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setPadding(Ui.dp(this, 12), 0, Ui.dp(this, 6), Ui.dp(this, 8));
+        String[] labels = {"All", "Add Queue Playlist", "Clear Queue", "Done"};
+        float[] weights = {.6f, 2.2f, 1.4f, .8f};
+        for (int k = 0; k < labels.length; k++) {
+            final int kk = k;
+            TextView t = Ui.text(this, labels[k], 12, k == 2 ? Ui.RED : Ui.TXT, true);
+            t.setGravity(Gravity.CENTER);
+            t.setSingleLine(true);
+            t.setPadding(Ui.dp(this, 4), Ui.dp(this, 9), Ui.dp(this, 4), Ui.dp(this, 9));
+            t.setBackground(Ui.rip(Ui.SURF2, 16, this));
+            t.setOnClickListener(v -> queueSelAction(kk));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, Ui.WRAP, weights[k]);
+            lp.setMargins(0, 0, Ui.dp(this, 6), 0);
+            bar.addView(t, lp);
+        }
+        return bar;
+    }
+
+    void queueSelAction(int k) {
+        if (k == 0) { // all / none
+            boolean all = qSel.size() == engine.queue.size();
+            qSel.clear();
+            if (!all) for (int i = 0; i < engine.queue.size(); i++) qSel.add(i);
+        } else if (k == 1) {
+            List<Media> l = selectedQueueItems();
+            if (l.isEmpty()) { toast("Select items first"); return; }
+            addQueuePlaylist(l);
+            return;
+        } else if (k == 2) {
+            final java.util.ArrayList<Integer> which = new java.util.ArrayList<>(qSel);
+            if (which.isEmpty()) { toast("Select items first"); return; }
+            confirmDanger("Remove from queue?", which.size() + (which.size() == 1 ? " item is" : " items are") + " removed from the play queue.", "Remove", () -> {
+                engine.removeMany(which);
+                qSel.clear();
+                if (engine.queue.isEmpty()) { hideQueue(); return; }
+                qSelMode = false;
+                refreshQueueMode();
+            });
+            return;
+        } else {
+            qSelMode = false;
+            qSel.clear();
+        }
+        refreshQueueMode();
+    }
+
+    /** Shows / hides the select-mode bar, switches the hint and the drag handle, redraws the rows. */
+    void refreshQueueMode() {
+        if (queueSelBar != null) queueSelBar.setVisibility(qSelMode ? View.VISIBLE : View.GONE);
+        if (queueHint != null) queueHint.setText(qSelMode ? "Tap items to select them."
+                : "Hold \u2261 and drag to re-arrange. Tap an item for options.");
+        if (queueList != null) queueList.noDrag = qSelMode;
+        if (queueAd != null) queueAd.notifyDataSetChanged();
+        updateQueueHead();
     }
 
     void queueOptions(final int i) {

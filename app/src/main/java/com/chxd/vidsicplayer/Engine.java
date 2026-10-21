@@ -684,6 +684,27 @@ class Engine {
         playAt(i < queue.size() ? i : 0);
     }
 
+    /** Empties the whole play queue and stops playback. */
+    void clearQueue() {
+        qDirty = true;
+        free();
+        queue.clear();
+        idx = -1;
+        fire();
+    }
+
+    /** Removes several queue entries (positions); the playing one last so playback only jumps once. */
+    void removeMany(java.util.Collection<Integer> which) {
+        java.util.ArrayList<Integer> l = new java.util.ArrayList<>(new java.util.TreeSet<>(which));
+        boolean curSel = false;
+        for (int k = l.size() - 1; k >= 0; k--) {
+            int i = l.get(k);
+            if (i == idx) { curSel = true; continue; }
+            removeAt(i);
+        }
+        if (curSel) removeAt(idx);
+    }
+
     void remove(String key) {
         qDirty = true;
         for (int i = queue.size() - 1; i >= 0; i--) {
