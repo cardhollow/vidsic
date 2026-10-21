@@ -104,6 +104,34 @@ final class Ui {
         ONACC = lum(acc) > 0.6 ? 0xFF111111 : 0xFFFFFFFF;
     }
 
+    // ---------- native widgets in the theme's accent (they would otherwise use the manifest's violet) ----------
+    static void tintSwitch(android.widget.Switch sw) {
+        int[][] st = {{android.R.attr.state_checked}, {}};
+        sw.setThumbTintList(new ColorStateList(st, new int[]{ACC, LIGHT ? 0xFF8E8E9C : 0xFFC4C4D2}));
+        sw.setTrackTintList(new ColorStateList(st, new int[]{ACC, SUB}));
+    }
+
+    static void tintSeek(android.widget.SeekBar sb) {
+        sb.setProgressTintList(ColorStateList.valueOf(ACC));
+        sb.setThumbTintList(ColorStateList.valueOf(ACC));
+        sb.setProgressBackgroundTintList(ColorStateList.valueOf(SURF2));
+    }
+
+    /** Text cursor, selection handles and highlight of an EditText in the accent color. */
+    static void tintEdit(Context c, EditText et) {
+        try {
+            GradientDrawable cur = new GradientDrawable();
+            cur.setColor(ACC);
+            cur.setSize(dp(c, 2), dp(c, 22));
+            et.setTextCursorDrawable(cur);
+            Drawable l = et.getTextSelectHandleLeft(), r = et.getTextSelectHandleRight(), m = et.getTextSelectHandle();
+            if (l != null) { l = l.mutate(); l.setTint(ACC); et.setTextSelectHandleLeft(l); }
+            if (r != null) { r = r.mutate(); r.setTint(ACC); et.setTextSelectHandleRight(r); }
+            if (m != null) { m = m.mutate(); m.setTint(ACC); et.setTextSelectHandle(m); }
+        } catch (Throwable t) { }
+        et.setHighlightColor((ACC & 0x00FFFFFF) | 0x55000000);
+    }
+
     static int dp(Context c, float v) { return Math.round(v * c.getResources().getDisplayMetrics().density); }
 
     static GradientDrawable shape(int color, float r, Context c) {
@@ -480,7 +508,7 @@ final class Ui {
         et.setSelectAllOnFocus(true);
         et.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         et.setImeOptions(EditorInfo.IME_ACTION_DONE);
-        et.setHighlightColor((ACC & 0x00FFFFFF) | 0x55000000);
+        tintEdit(c, et);
         et.setBackground(shape(SURF2, 12, c));
         et.setPadding(dp(c, 14), dp(c, 12), dp(c, 14), dp(c, 12));
         LinearLayout.LayoutParams ep = new LinearLayout.LayoutParams(MATCH, WRAP);

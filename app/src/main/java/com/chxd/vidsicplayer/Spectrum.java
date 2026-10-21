@@ -46,9 +46,10 @@ class Spectrum {
 
     /** Called whenever the engine state changes: (re)attaches to the current player, or lets go. */
     void update() {
-        if (suspended || !wanted() || !permitted() || en.mp == null || !en.prepared) { release(); return; }
+        android.media.MediaPlayer sp = en.sound();
+        if (suspended || !wanted() || !permitted() || sp == null || !en.prepared) { release(); return; }
         int id;
-        try { id = en.mp.getAudioSessionId(); } catch (Exception e) { release(); return; }
+        try { id = sp.getAudioSessionId(); } catch (Exception e) { release(); return; }
         if (viz == null || id != session) {
             if (failed && id == session) return;
             release();

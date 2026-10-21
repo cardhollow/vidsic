@@ -22,6 +22,7 @@ import org.json.JSONObject;
  *   favorites.json        favorites (audio + video)
  *   playlists_audio.json  audio playlists
  *   playlists_video.json  video playlists
+ *   captions/<key>.json   imported captions, one file per video / audio (restore adds them, nothing is deleted)
  * Every item is saved with its key plus file name and size, so it can still be matched after a
  * reinstall or a library rescan changed the MediaStore ids.
  */
@@ -33,7 +34,7 @@ final class Backup {
     }
 
     static class Result {
-        int favorites, audioPlaylists, videoPlaylists;
+        int favorites, audioPlaylists, videoPlaylists, captions;
     }
 
     // ---------- create ----------
@@ -84,6 +85,14 @@ final class Backup {
         write(z, FAV, fav);
         write(z, PL_A, playlists(s, false, byKey));
         write(z, PL_V, playlists(s, true, byKey));
+        for (String k : s.capKeys()) {
+            String text = s.readCaps(k);
+            if (text == null) continue;
+            JSONObject o = item(k, byKey);
+            o.put("version", 1);
+            o.put("text", text);
+            write(z, "captions/" + k + ".json", o);
+        }
         z.finish();
         z.flush();
     }
@@ -128,22 +137,32 @@ final class Backup {
     /** Replaces favorites and playlists with the ones in the zip. Throws when it isn't a Vidsic backup. */
     static Result restore(Store s, Map<String, Media> byKey, InputStream is) throws Exception {
         String fav = null, pa = null, pv = null;
+        List<String> caps = new ArrayList<>();
         ZipInputStream z = new ZipInputStream(is);
         ZipEntry e;
         while ((e = z.getNextEntry()) != null) {
             String n = e.getName();
+            if (n.startsWith("captions/") && n.endsWith(".json")) { caps.add(read(z)); continue; }
             int slash = n.lastIndexOf('/');
             if (slash >= 0) n = n.substring(slash + 1);
             if (n.equals(FAV)) fav = read(z);
             else if (n.equals(PL_A)) pa = read(z);
             else if (n.equals(PL_V)) pv = read(z);
         }
-        if (fav == null && pa == null && pv == null) throw new Exception("not a backup");
+        if (fav == null && pa == null && pv == null && caps.isEmpty()) throw new Exception("not a backup");
 
         // parse everything first so a broken file can't leave things half restored
         JSONArray arr = fav == null ? null : new JSONObject(fav).optJSONArray("items");
         List<String[]> plA = pa == null ? null : parsePl(pa, false, byKey);
         List<String[]> plV = pv == null ? null : parsePl(pv, true, byKey);
+        List<String[]> cp = new ArrayList<>(); // [key, text]
+        for (String c : caps) {
+            JSONObject o = new JSONObject(c);
+            String text = o.optString("text", "");
+            String k0 = o.optString("key", "");
+            if (text.isEmpty() || k0.isEmpty()) continue;
+            cp.add(new String[]{key(o, k0.startsWith("v"), byKey), text});
+        }
 
         Result r = new Result();
         if (fav != null) {
@@ -164,6 +183,7 @@ final class Backup {
         }
         if (plA != null) { applyPl(s, false, plA); r.audioPlaylists = plA.size(); }
         if (plV != null) { applyPl(s, true, plV); r.videoPlaylists = plV.size(); }
+        for (String[] c : cp) if (s.saveCaps(c[0], c[1])) r.captions++;
         return r;
     }
 

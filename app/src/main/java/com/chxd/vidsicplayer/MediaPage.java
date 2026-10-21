@@ -104,6 +104,7 @@ class MediaPage {
         search.setSingleLine(true);
         search.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
         search.setPadding(Ui.dp(a, 10), 0, 0, 0);
+        Ui.tintEdit(a, search);
         sb.addView(search, new LinearLayout.LayoutParams(0, Ui.MATCH, 1));
         clear = Ui.btn(a, R.drawable.ic_close, Ui.SUB, 18, 9);
         clear.setVisibility(View.GONE);
@@ -581,6 +582,12 @@ class MediaPage {
     void sug(String p) {
         Row x = new Row(); x.type = SUG; x.title = p;
         x.click = () -> { search.setText(p); search.setSelection(p.length()); unfocus(); };
+        x.more = () -> { // the x at the right: forget this search right away
+            List<String> l = s.list(sk());
+            l.remove(p);
+            s.save(sk(), l);
+            refresh();
+        };
         rows.add(x);
     }
 
@@ -713,13 +720,17 @@ class MediaPage {
                 return t;
             }
             case SUG: {
-                row.setPadding(Ui.dp(c, 16), 0, Ui.dp(c, 16), 0);
+                row.setPadding(Ui.dp(c, 16), 0, Ui.dp(c, 4), 0);
                 row.setMinimumHeight(Ui.dp(c, 48));
                 row.setBackground(Ui.rip(0, 0, c));
                 row.addView(Ui.icon(c, R.drawable.ic_history, Ui.SUB, 20));
                 TextView t = Ui.text(c, r.title, 15, Ui.TXT, false);
                 t.setPadding(Ui.dp(c, 14), 0, 0, 0);
-                row.addView(t);
+                row.addView(t, new LinearLayout.LayoutParams(0, Ui.WRAP, 1));
+                ImageView rm = Ui.btn(c, R.drawable.ic_close, Ui.SUB, 18, 11);
+                rm.setContentDescription("Remove from search history");
+                rm.setOnClickListener(v -> r.more.run());
+                row.addView(rm);
                 row.setOnClickListener(v -> r.click.run());
                 return row;
             }

@@ -3,14 +3,59 @@ package com.chxd.vidsicplayer;
 import android.content.Context;
 import android.content.SharedPreferences;
 import org.json.JSONArray;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
 class Store {
     final SharedPreferences p;
+    final File capDir;
 
-    Store(Context c) { p = c.getSharedPreferences("vidsic", 0); }
+    Store(Context c) {
+        p = c.getSharedPreferences("vidsic", 0);
+        capDir = new File(c.getFilesDir(), "captions");
+    }
+
+    // captions: one text file per video / audio, named after its key (kept inside the app, and part of the backup)
+    File capFile(String key) { return new File(capDir, key.replaceAll("[^A-Za-z0-9_-]", "_") + ".cap"); }
+    boolean hasCaps(Media m) { return capFile(m.key()).isFile(); }
+
+    String readCaps(String key) {
+        File f = capFile(key);
+        if (!f.isFile()) return null;
+        try (FileInputStream in = new FileInputStream(f)) {
+            ByteArrayOutputStream b = new ByteArrayOutputStream();
+            byte[] buf = new byte[16384];
+            int n;
+            while ((n = in.read(buf)) > 0) b.write(buf, 0, n);
+            return b.toString("UTF-8");
+        } catch (Exception e) { return null; }
+    }
+
+    boolean saveCaps(String key, String text) {
+        try {
+            capDir.mkdirs();
+            try (FileOutputStream o = new FileOutputStream(capFile(key))) { o.write(text.getBytes("UTF-8")); }
+            return true;
+        } catch (Exception e) { return false; }
+    }
+
+    void deleteCaps(String key) { capFile(key).delete(); }
+
+    /** Keys that currently have captions (file names are sanitized keys, which stay valid keys: letters, digits, '-'). */
+    List<String> capKeys() {
+        List<String> r = new ArrayList<>();
+        File[] fs = capDir.listFiles();
+        if (fs != null) for (File f : fs) {
+            String n = f.getName();
+            if (n.endsWith(".cap")) r.add(n.substring(0, n.length() - 4));
+        }
+        return r;
+    }
 
     List<String> list(String k) {
         List<String> r = new ArrayList<>();
@@ -102,7 +147,8 @@ class Store {
             if (l.remove(m.key())) save(k, l);
         }
         for (String n : playlists(m.video)) removeFromPlaylist(m, n);
-        p.edit().remove("pc_" + m.key()).remove("ren_" + m.key()).apply();
+        p.edit().remove("pc_" + m.key()).remove("ren_" + m.key()).remove("sync_" + m.key()).apply();
+        deleteCaps(m.key());
     }
 
     /** A hidden file got a new path (and so a new key): carry favorites, playlists, history and counters over. */
@@ -120,6 +166,9 @@ class Store {
         SharedPreferences.Editor e = p.edit();
         if (p.contains("pc_" + o)) e.putInt("pc_" + n, p.getInt("pc_" + o, 0)).remove("pc_" + o);
         if (p.contains("ren_" + o)) e.putString("ren_" + n, p.getString("ren_" + o, "")).remove("ren_" + o);
+        if (p.contains("sync_" + o)) e.putInt("sync_" + n, p.getInt("sync_" + o, 0)).remove("sync_" + o);
         e.apply();
+        File cf = capFile(o);
+        if (cf.isFile()) cf.renameTo(capFile(n));
     }
 }

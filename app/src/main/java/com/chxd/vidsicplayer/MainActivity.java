@@ -69,6 +69,7 @@ public class MainActivity extends Activity implements Engine.L {
     BaseAdapter queueAd;
     TextView queueHead;
     String pendingSpecKey;
+    Media pendingCapMedia;
     boolean loading, reloadQueued;
     long lastLoad;
     ContentObserver mediaObs;
@@ -156,6 +157,7 @@ public class MainActivity extends Activity implements Engine.L {
         super.onResume();
         h.post(ticker);
         engine.spec.setUiVisible(true);
+        if (player != null) player.updateKeepOn();
         if (loading) { if (stats != null) refreshStats(); }
         else if (store.bool("auto_rescan", false) && SystemClock.uptimeMillis() - lastLoad > 30000) loadMedia();
         else if (wantHidden() && !scanned && Environment.isExternalStorageManager()) loadMedia();
@@ -165,6 +167,8 @@ public class MainActivity extends Activity implements Engine.L {
         super.onPause();
         h.removeCallbacks(ticker);
         engine.spec.setUiVisible(false);
+        engine.saveNow();
+        if (player != null) player.exitSleep(); // leaving the app (or the system sleeping the screen) ends the sleep screen
     }
 
     @Override
@@ -482,6 +486,12 @@ public class MainActivity extends Activity implements Engine.L {
                 col.addView(Ui.text(c, m.title, 14, now ? Ui.ACC : Ui.TXT, now));
                 col.addView(Ui.text(c, m.artist, 12, Ui.SUB, false));
                 r.addView(col, new LinearLayout.LayoutParams(0, Ui.WRAP, 1));
+                if (now) {
+                    // audio spectrum of the playing item, right before its duration
+                    LinearLayout.LayoutParams ep = new LinearLayout.LayoutParams(Ui.dp(c, 18), Ui.dp(c, 16));
+                    ep.setMargins(0, 0, Ui.dp(c, 10), 0);
+                    r.addView(new Ui.Eq(c, Ui.ACC, engine.isPlaying()), ep);
+                }
                 r.addView(Ui.text(c, Ui.fmt(m.duration), 12, Ui.SUB, false));
                 if (i == lv.drag) r.setAlpha(0f); // the floating copy is drawn by the list while dragging
                 return r;
@@ -496,6 +506,11 @@ public class MainActivity extends Activity implements Engine.L {
         lv.setOnItemClickListener((p, v, i, id) -> queueOptions(i));
         int maxH = Math.min(Ui.dp(this, 56) * Math.max(1, engine.queue.size()), root.getHeight() * 50 / 100);
         box.addView(lv, new LinearLayout.LayoutParams(Ui.MATCH, maxH));
+        // open on the item that is playing, centered in the list
+        lv.post(() -> {
+            if (engine.idx >= 0 && engine.idx < engine.queue.size())
+                lv.setSelectionFromTop(engine.idx, Math.max(0, (lv.getHeight() - Ui.dp(this, 56)) / 2));
+        });
 
         boolean pl = player.getVisibility() == View.VISIBLE;
         FrameLayout.LayoutParams bp = new FrameLayout.LayoutParams(Ui.MATCH, Ui.WRAP, Gravity.BOTTOM);
@@ -705,10 +720,49 @@ public class MainActivity extends Activity implements Engine.L {
             if (res == RESULT_OK && data != null && data.getData() != null) writeBackup(data.getData());
         } else if (req == 81) {
             if (res == RESULT_OK && data != null && data.getData() != null) askRestore(data.getData());
+        } else if (req == 82) {
+            if (res == RESULT_OK && data != null && data.getData() != null && pendingCapMedia != null)
+                importCaptions(pendingCapMedia, data.getData());
+            pendingCapMedia = null;
         } else if (req == 78) {
             if (res == RESULT_OK && pendingRen != null) applyRename(pendingRen, pendingRenName, true);
             pendingRen = null;
             pendingRenName = null;
+        }
+    }
+
+    // ---------- captions ----------
+    /** Asks for a subtitle file (system picker, no storage permission needed). */
+    void pickCaptions(Media m) {
+        pendingCapMedia = m;
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"application/x-subrip", "text/vtt", "text/plain", "application/octet-stream", "text/*",
+                "application/ttml+xml", "application/xml", "application/x-subtitle"});
+        try { startActivityForResult(i, 82); } catch (Exception e) { pendingCapMedia = null; toast("No file picker available"); }
+    }
+
+    void importCaptions(Media m, Uri u) {
+        try (InputStream is = getContentResolver().openInputStream(u)) {
+            java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[16384];
+            int n;
+            while ((n = is.read(buf)) > 0) {
+                b.write(buf, 0, n);
+                if (b.size() > 4 * 1024 * 1024) throw new Exception("too big");
+            }
+            String text = Captions.decode(b.toByteArray());
+            if (Captions.parse(text) == null) {
+                Ui.notice(this, "Can't read captions", "No subtitles were found in " + displayName(u) + ". Supported: .srt .vtt .ttml .dfxp .xml .ass .ssa .sbv .lrc .sub");
+                return;
+            }
+            if (!store.saveCaps(m.key(), text)) { Ui.notice(this, "Captions not saved", "The file could not be stored."); return; }
+            store.setBool("caps_on", true);
+            player.capsChanged();
+            toast("Captions added");
+        } catch (Exception e) {
+            Ui.notice(this, "Can't read captions", "That file could not be opened or is too large.");
         }
     }
 
@@ -756,21 +810,23 @@ public class MainActivity extends Activity implements Engine.L {
         try (OutputStream os = getContentResolver().openOutputStream(u, "wt")) {
             Backup.create(store, byKey, os);
             Ui.notice(this, "Backup created", "Saved as " + displayName(u) + "\n\n" + store.list("fav").size() + " favorites, "
-                    + store.playlists(false).size() + " audio playlists, " + store.playlists(true).size() + " video playlists.");
+                    + store.playlists(false).size() + " audio playlists, " + store.playlists(true).size() + " video playlists, "
+                    + store.capKeys().size() + " captions.");
         } catch (Exception e) {
             Ui.notice(this, "Backup failed", "The backup could not be written. Try another location.");
         }
     }
 
     void askRestore(final Uri u) {
-        confirm("Restore backup?", "Your current favorites and playlists will be replaced by the ones in " + displayName(u) + ".",
+        confirm("Restore backup?", "Your current favorites and playlists will be replaced by the ones in " + displayName(u)
+                        + ". Captions in it are added to the ones you have.",
                 "Restore", () -> {
                     try (InputStream is = getContentResolver().openInputStream(u)) {
                         Backup.Result r = Backup.restore(store, byKey, is);
                         refreshAll();
                         player.changed();
                         Ui.notice(this, "Backup restored", r.favorites + " favorites, " + r.audioPlaylists + " audio playlists, "
-                                + r.videoPlaylists + " video playlists.");
+                                + r.videoPlaylists + " video playlists, " + r.captions + " captions.");
                     } catch (Exception e) {
                         Ui.notice(this, "Restore failed", "That file is not a Vidsic backup, or it is damaged. Nothing was changed.");
                     }
@@ -905,6 +961,8 @@ public class MainActivity extends Activity implements Engine.L {
 
         card = group(col, "PLAYBACK");
         toggle(card, "Play next automatically", "Continue with the next item in the queue", "autonext", true, null);
+        toggle(card, "Screen Wake Lock", "The device won't turn the screen off by itself while the app is open",
+                "wake_lock", true, () -> { if (player != null) player.updateKeepOn(); });
         toggle(card, "Show history", "Show recently played at the top of Audios / Videos", "showhist", true, null);
 
         card = group(col, "HEADSET");
@@ -928,7 +986,7 @@ public class MainActivity extends Activity implements Engine.L {
         card = group(col, "BACKUP");
         action(card, R.drawable.ic_backup, "Create Backup", this::createBackup);
         action(card, R.drawable.ic_restore, "Restore Backup", this::pickBackup);
-        note(card, "A vidsic_backup zip with your favorites and your audio and video playlists (separate files).");
+        note(card, "A vidsic_backup zip with your favorites, your audio and video playlists (separate files) and the captions you imported.");
 
         card = group(col, "MISC");
         toggle(card, "Audio Spectrum Sync", "The bars next to the playing item follow the real audio instead of a preset animation",
@@ -985,6 +1043,7 @@ public class MainActivity extends Activity implements Engine.L {
         c.addView(st);
         row.addView(c, new LinearLayout.LayoutParams(0, Ui.WRAP, 1));
         Switch sw = new Switch(this);
+        Ui.tintSwitch(sw); // accent of the chosen theme, not the manifest's violet
         sw.setChecked(store.bool(key, def));
         sw.setOnCheckedChangeListener((b, on) -> {
             store.setBool(key, on);
