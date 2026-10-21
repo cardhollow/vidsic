@@ -49,7 +49,7 @@ class PlayerView extends FrameLayout implements Engine.L {
     Captions caps;
     String capKey = "", capShown;
     String artKey = "";
-    Ui.SpectrumView spectrum; // "Audio Player Spectrum": replaces the thumbnail / note
+    View spectrum; // "Audio Player Spectrum": replaces the thumbnail / note
 
     PlayerView(MainActivity act) {
         super(act);
@@ -675,6 +675,11 @@ class PlayerView extends FrameLayout implements Engine.L {
             ab.width = s; ab.height = s; ab.topMargin = tm; ab.gravity = g;
             artBox.setLayoutParams(ab);
         }
+        if (spectrum instanceof VibeView) { // keep the visual centred where the artwork would be, sized like it
+            VibeView vv = (VibeView) spectrum;
+            vv.ref = s;
+            vv.focusY = tm + s / 2f;
+        }
         int w, h;
         if (en.vw > 0 && en.vh > 0) {
             float sc = Math.min((float) aw / en.vw, (float) ah / en.vh);
@@ -694,14 +699,21 @@ class PlayerView extends FrameLayout implements Engine.L {
         sub.setText(m == null ? "" : m.artist);
         boolean showVideo = m != null && m.video && !en.audioMode;
         sv.setVisibility(showVideo ? View.VISIBLE : View.GONE);
-        artBox.setVisibility(showVideo ? View.GONE : View.VISIBLE);
         boolean specOn = a.store.bool("spec_player", false);
-        String k = m == null ? "" : m.key() + (m.video ? "v" : "a") + (specOn ? "s" : "");
+        boolean vibe = "vibe".equals(a.store.p.getString("viz_mode", "bar"));
+        boolean vibeFull = specOn && vibe && m != null; // Vibe fills the whole player instead of sitting in the artwork box
+        artBox.setVisibility(showVideo || vibeFull ? View.GONE : View.VISIBLE);
+        String k = m == null ? "" : m.key() + (m.video ? "v" : "a") + (specOn ? (vibe ? "w" : "s") : "");
         if (!k.equals(artKey)) {
             artKey = k;
             artBox.removeAllViews();
+            if (spectrum != null && spectrum.getParent() == area) area.removeView(spectrum);
             spectrum = null;
-            if (m != null && specOn) {
+            if (vibeFull) {
+                spectrum = new VibeView(a);
+                area.addView(spectrum, 0, new FrameLayout.LayoutParams(Ui.MATCH, Ui.MATCH)); // behind everything, controls float above it
+                fit();
+            } else if (m != null && specOn) {
                 spectrum = new Ui.SpectrumView(a);
                 artBox.addView(spectrum, new FrameLayout.LayoutParams(Ui.MATCH, Ui.MATCH));
             } else if (m != null) {
@@ -717,7 +729,10 @@ class PlayerView extends FrameLayout implements Engine.L {
                 Ui.thumb(a, m, t, 600);
             }
         }
-        if (spectrum != null) spectrum.invalidate();
+        if (spectrum != null) {
+            if (vibeFull) spectrum.setVisibility(showVideo ? View.GONE : View.VISIBLE);
+            spectrum.invalidate();
+        }
         play.setImageResource(en.isPlaying() ? R.drawable.ic_pause : R.drawable.ic_play);
         shuf.setColorFilter(en.shuffle ? Ui.ACC : Ui.SUB);
         rep.setImageResource(en.repeat == 2 ? R.drawable.ic_repeat_one : R.drawable.ic_repeat);

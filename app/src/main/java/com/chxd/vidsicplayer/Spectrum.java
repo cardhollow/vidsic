@@ -28,7 +28,7 @@ class Spectrum {
         else en.handler.postDelayed(letGo, 60000);
     }
     final float[] bands = new float[BANDS];
-    byte[] fft;
+    byte[] fft, wave; // wave: raw waveform (unsigned bytes centered on 128), used by the Vibe visual
     long last;
 
     Spectrum(Engine e) { en = e; }
@@ -62,6 +62,7 @@ class Spectrum {
                 session = id;
                 failed = false;
                 fft = new byte[v.getCaptureSize()];
+                wave = new byte[v.getCaptureSize()];
             } catch (Exception e) {
                 viz = null;
                 session = id;
@@ -92,6 +93,7 @@ class Spectrum {
         if (viz != null && en.isPlaying()) {
             try {
                 if (viz.getFft(fft) == Visualizer.SUCCESS) { fold(); got = true; }
+                if (got && wave != null) viz.getWaveForm(wave);
             } catch (Exception e) { }
         }
         if (!got) for (int i = 0; i < BANDS; i++) bands[i] *= 0.82f;

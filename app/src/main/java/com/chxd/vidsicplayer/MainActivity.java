@@ -988,11 +988,16 @@ public class MainActivity extends Activity implements Engine.L {
         action(card, R.drawable.ic_restore, "Restore Backup", this::pickBackup);
         note(card, "A vidsic_backup zip with your favorites, your audio and video playlists (separate files) and the captions you imported.");
 
-        card = group(col, "MISC");
+        card = group(col, "VISUALIZER");
         toggle(card, "Audio Spectrum Sync", "The bars next to the playing item follow the real audio instead of a preset animation",
                 "spec_sync", false, () -> specToggled("spec_sync"));
         toggle(card, "Audio Player Spectrum", "In the player, show a live audio spectrum instead of the thumbnail / music note",
                 "spec_player", false, () -> specToggled("spec_player"));
+        note(card, "Visual");
+        chips(card, new String[]{"Bar", "Vibe"}, new String[]{"bar", "vibe"}, store.p.getString("viz_mode", "bar"),
+                v -> { store.p.edit().putString("viz_mode", v).apply(); engine.fire(); rebuildUi(); });
+        note(card, "Bar: the classic mirrored bars. Vibe: listens to the sound live, senses the mood (sad, moody, chill, party, EDM, intense) "
+                + "and restyles itself. Shown in the player when Audio Player Spectrum is on.");
 
         card = group(col, "ABOUT");
         LinearLayout about = new LinearLayout(this);
