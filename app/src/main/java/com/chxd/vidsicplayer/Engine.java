@@ -24,7 +24,6 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import org.json.JSONArray;
-import org.json.JSONObject;
 import android.graphics.SurfaceTexture;
 import android.view.Surface;
 import java.util.ArrayList;
@@ -32,8 +31,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Random;
 import java.util.Set;
+import java.util.function.Consumer;
 
-/** One engine for the whole process, so music keeps playing when the screen is closed. */
 class Engine {
     interface L { void changed(); }
 
@@ -54,38 +53,32 @@ class Engine {
     final Handler handler = new Handler(Looper.getMainLooper());
     MediaPlayer mp;
     final ArrayList<Media> queue = new ArrayList<>();
-    int idx = -1, repeat = 0, vw, vh; // repeat: 0 off, 1 all, 2 one
+    int idx = -1, repeat = 0, vw, vh;
     boolean audioMode, shuffle, prepared;
-    boolean surfaceOn; // mp currently has the video surface
-    final ArrayList<L> ls = new ArrayList<>();   // UI listeners
-    final ArrayList<L> soft = new ArrayList<>(); // notification service
+    boolean surfaceOn;
+    final ArrayList<L> ls = new ArrayList<>();
+    final ArrayList<L> soft = new ArrayList<>();
     final Random rnd = new Random();
     final Spectrum spec = new Spectrum(this);
 
-    // playback speed: what the user picked (0.2x - 5x), times a temporary boost while the screen is held
     static final float MIN_SPEED = 0.2f, MAX_SPEED = 5f;
     float speed = 1f, boost = 1f;
 
-    // Audio / video sync. MediaPlayer cannot shift sound against picture, so when an offset is set the picture
-    // (plus its muted sound) keeps playing in `mp` and the sound comes from a second, audio-only player `ap`
-    // that is kept `syncMs` ahead of (+) or behind (-) the picture.
     MediaPlayer ap;
     boolean apReady;
     int syncMs;
     float apTrim = 1f, duck = 1f;
     long lastAlign;
 
-    // saved play queue: survives the app / process being closed
     final File qFile;
     boolean qDirty;
-    int restPos; // position of the restored (not yet started) item
+    long qSeq, qWritten;
+    int restPos;
     boolean posTickOn;
 
-    // notification / lock-screen artwork
     Bitmap art;
     String artKey = "";
 
-    // audio focus + headset handling
     AudioFocusRequest focusReq;
     boolean resumeOnFocus;
     final Set<Integer> btIds = new HashSet<>();
@@ -106,9 +99,12 @@ class Engine {
             @Override public void onSkipToPrevious() { prev(); }
             @Override public void onSeekTo(long p) { seek((int) p); }
             @Override public void onStop() { pause(); }
+            @Override public void onCustomAction(String action, android.os.Bundle extras) {
+                if (CA_SHUFFLE.equals(action)) { shuffle = !shuffle; fire(); }
+                else if (CA_REPEAT.equals(action)) { repeat = (repeat + 1) % 3; fire(); }
+            }
         });
 
-        // "Pause music when detach headphone" (wired unplug or bluetooth disconnect)
         try {
             c.registerReceiver(new BroadcastReceiver() {
                 @Override public void onReceive(Context x, Intent i) {
@@ -117,11 +113,37 @@ class Engine {
             }, new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY));
         } catch (Exception e) { }
 
+        watchVolume(c);
+        refreshSaver();
+        try {
+            c.registerReceiver(new BroadcastReceiver() {
+                @Override public void onReceive(Context x, Intent i) { powerChanged(); }
+            }, new IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED));
+        } catch (Exception e) { }
+
         watchBluetooth();
         restoreQueue();
     }
 
-    // ---------- saved queue ----------
+    static volatile boolean SAVER;
+
+    void refreshSaver() {
+        boolean on = store.bool("batt_saver", false);
+        if (!on && store.bool("batt_auto", false)) {
+            try { on = ((PowerManager) ctx.getSystemService(Context.POWER_SERVICE)).isPowerSaveMode(); } catch (Exception e) { }
+        }
+        SAVER = on;
+    }
+
+    void powerChanged() {
+        refreshSaver();
+        spec.retry();
+        spec.update();
+        fire();
+    }
+
+    boolean lowPower() { return SAVER || !spec.uiVisible; }
+
     final Runnable saver = this::saveNow;
 
     void scheduleSave() {
@@ -129,7 +151,6 @@ class Engine {
         handler.postDelayed(saver, 800);
     }
 
-    /** Position of the current item: live while a player exists, the restored one before it is started. */
     int savedPos() { return mp == null ? restPos : pos(); }
 
     void saveNow() {
@@ -139,11 +160,19 @@ class Engine {
                     .putBoolean("q_shuf", shuffle).putInt("q_rep", repeat).apply();
             if (!qDirty) return;
             qDirty = false;
-            JSONArray a = new JSONArray();
-            for (Media m : queue) a.put(m.toJson());
-            final String out = a.toString();
+
+            final ArrayList<Media> snap = new ArrayList<>(queue);
+            final long seq = ++qSeq;
             Ui.EX.execute(() -> {
+                final String out;
+                try {
+                    JSONArray a = new JSONArray();
+                    for (Media m : snap) a.put(m.toJson());
+                    out = a.toString();
+                } catch (Exception e) { return; }
                 synchronized (qFile) {
+                    if (seq < qWritten) return;
+                    qWritten = seq;
                     try {
                         File tmp = new File(qFile.getPath() + ".tmp");
                         try (FileOutputStream o = new FileOutputStream(tmp)) { o.write(out.getBytes("UTF-8")); }
@@ -166,8 +195,7 @@ class Engine {
             for (int i = 0; i < a.length(); i++) {
                 Media m = Media.fromJson(a.getJSONObject(i));
                 if (m == null) continue;
-                String t = store.renamed(m);
-                if (t != null) m.title = t;
+                store.applyMeta(m);
                 queue.add(m);
             }
             if (queue.isEmpty()) return;
@@ -178,14 +206,14 @@ class Engine {
             repeat = store.p.getInt("q_rep", 0);
             if (repeat < 0 || repeat > 2) repeat = 0;
             syncMs = store.p.getInt("sync_" + cur().key(), 0);
-            // show it on the lock screen / mini player right away, paused, ready to resume
+
             handler.post(this::fire);
         } catch (Exception e) { }
     }
 
     final Runnable posTick = new Runnable() {
         @Override public void run() {
-            if (isPlaying()) { saveNow(); handler.postDelayed(this, 10000); } else posTickOn = false;
+            if (isPlaying()) { saveNow(); handler.postDelayed(this, lowPower() ? 30000 : 10000); } else posTickOn = false;
         }
     };
 
@@ -195,7 +223,6 @@ class Engine {
         handler.postDelayed(posTick, 10000);
     }
 
-    // ---------- listeners ----------
     void listen(L l) { if (!ls.contains(l)) ls.add(l); }
     void listenSoft(L l) { if (!soft.contains(l)) soft.add(l); }
     void unlistenSoft(L l) { soft.remove(l); }
@@ -206,11 +233,23 @@ class Engine {
         spec.update();
         for (L l : new ArrayList<>(ls)) l.changed();
         for (L l : new ArrayList<>(soft)) l.changed();
+        scheduleWidget();
     }
+
+    final Runnable widgetUpd = this::updateWidgets;
+
+    void updateWidgets() { Widgets.updatePlayers(ctx); }
+
+    void scheduleWidget() {
+        if (!store.bool("w_player_on", false)) return;
+        handler.removeCallbacks(widgetUpd);
+        handler.postDelayed(widgetUpd, 600);
+    }
+
+    static final String CA_SHUFFLE = "vidsic.shuffle", CA_REPEAT = "vidsic.repeat";
 
     Media cur() { return idx >= 0 && idx < queue.size() ? queue.get(idx) : null; }
 
-    // ---------- media session (lock screen / notification / headset buttons) ----------
     void syncSession() {
         try {
             Media m = cur();
@@ -227,6 +266,11 @@ class Engine {
             int st = !prepared ? (mp == null ? PlaybackState.STATE_STOPPED : PlaybackState.STATE_BUFFERING)
                     : (isPlaying() ? PlaybackState.STATE_PLAYING : PlaybackState.STATE_PAUSED);
             session.setPlaybackState(new PlaybackState.Builder()
+                    .addCustomAction(new PlaybackState.CustomAction.Builder(CA_SHUFFLE, shuffle ? "Shuffle on" : "Shuffle off",
+                            shuffle ? R.drawable.st_shuffle_on : R.drawable.st_shuffle_off).build())
+                    .addCustomAction(new PlaybackState.CustomAction.Builder(CA_REPEAT,
+                            repeat == 0 ? "Loop off" : repeat == 1 ? "Loop all" : "Loop one",
+                            repeat == 0 ? R.drawable.st_repeat_off : repeat == 1 ? R.drawable.st_repeat_on : R.drawable.st_repeat_one_on).build())
                     .setActions(PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE | PlaybackState.ACTION_PLAY_PAUSE
                             | PlaybackState.ACTION_SKIP_TO_NEXT | PlaybackState.ACTION_SKIP_TO_PREVIOUS
                             | PlaybackState.ACTION_SEEK_TO | PlaybackState.ACTION_STOP)
@@ -248,6 +292,7 @@ class Engine {
                 art = bm;
                 syncSession();
                 for (L l : new ArrayList<>(soft)) l.changed();
+                scheduleWidget();
             });
         });
     }
@@ -257,7 +302,6 @@ class Engine {
         try { ctx.startForegroundService(new Intent(ctx, PlaybackService.class)); } catch (Exception e) { }
     }
 
-    // ---------- audio focus ----------
     final AudioManager.OnAudioFocusChangeListener focusL = ch -> {
         switch (ch) {
             case AudioManager.AUDIOFOCUS_LOSS:
@@ -281,7 +325,6 @@ class Engine {
 
     void vol(float v) { duck = v; applyVol(); }
 
-    /** The sound comes from `ap` while there is one (and `mp`, the picture, is muted). */
     void applyVol() {
         try {
             if (ap != null) { if (mp != null) mp.setVolume(0f, 0f); ap.setVolume(duck, duck); }
@@ -289,7 +332,6 @@ class Engine {
         } catch (Exception e) { }
     }
 
-    /** Player whose audio session carries the sound (what the spectrum listens to). */
     MediaPlayer sound() { return ap != null && apReady ? ap : mp; }
 
     void focus() {
@@ -306,7 +348,6 @@ class Engine {
         } catch (Exception e) { }
     }
 
-    // ---------- "Auto-play via bluetooth" ----------
     static boolean isBt(AudioDeviceInfo d) {
         int t = d.getType();
         return t == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP
@@ -318,21 +359,22 @@ class Engine {
             for (AudioDeviceInfo d : am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) if (isBt(d)) btIds.add(d.getId());
             am.registerAudioDeviceCallback(new AudioDeviceCallback() {
                 @Override public void onAudioDevicesAdded(AudioDeviceInfo[] added) {
+                    recheckRate();
                     boolean fresh = false;
                     for (AudioDeviceInfo d : added) if (isBt(d) && btIds.add(d.getId())) fresh = true;
-                    if (fresh && store.bool("bt_play", false)) {
-                        // give the bluetooth route a moment to settle
+                    if (fresh && store.bool("bt_play", false) && !SAVER) {
+
                         handler.postDelayed(() -> { if (!isPlaying() && !queue.isEmpty()) resume(); }, 1500);
                     }
                 }
                 @Override public void onAudioDevicesRemoved(AudioDeviceInfo[] removed) {
+                    recheckRate();
                     for (AudioDeviceInfo d : removed) btIds.remove(d.getId());
                 }
             }, handler);
         } catch (Exception e) { }
     }
 
-    // ---------- playback ----------
     void play(List<Media> list, int i) {
         queue.clear();
         queue.addAll(list);
@@ -340,9 +382,11 @@ class Engine {
         playAt(i);
     }
 
-    void playAt(int i) { playAt(i, 0); }
+    void playAt(int i) { playAt(i, 0, true); }
 
-    void playAt(int i, final int startPos) {
+    void playAt(int i, int startPos) { playAt(i, startPos, startPos <= 0); }
+
+    void playAt(int i, final int startPos, boolean history) {
         if (i < 0 || i >= queue.size()) return;
         idx = i;
         restPos = 0;
@@ -350,6 +394,7 @@ class Engine {
         free();
         vw = vh = 0;
         resumeOnFocus = false;
+        if (history) rateRebuilt = false;
         syncMs = store.p.getInt("sync_" + m.key(), 0);
         final MediaPlayer p = new MediaPlayer();
         mp = p;
@@ -365,20 +410,26 @@ class Engine {
                 if (x != mp) return;
                 prepared = true;
                 focus();
-                if (startPos > 0) { try { x.seekTo(startPos); } catch (Exception e) { } }
-                if (wantAp()) { try { x.setVolume(0f, 0f); } catch (Exception e) { } } // the sound will come from `ap`
+                if (wantAp()) { try { x.setVolume(0f, 0f); } catch (Exception e) { } }
                 else applyVol();
-                startP(x, rate());
-                ensureService();
-                startPosTick();
-                applySync();
-                fire();
+
+                if (startPos > 0) seekThen(startPos, () -> { if (x == mp) begin(x); });
+                else begin(x);
             });
+            p.setOnSeekCompleteListener(x -> { if (x == mp) seeked(); });
             p.setOnCompletionListener(x -> { if (x == mp) done(); });
             p.setOnErrorListener((x, a, b) -> { if (x == mp) { prepared = false; fire(); } return true; });
             p.prepareAsync();
         } catch (Exception e) { prepared = false; }
-        if (startPos <= 0) store.addHistory(m);
+        if (history) store.addHistory(m);
+        fire();
+    }
+
+    void begin(MediaPlayer x) {
+        startP(x, rate());
+        ensureService();
+        startPosTick();
+        applySync();
         fire();
     }
 
@@ -386,15 +437,74 @@ class Engine {
         dropAp();
         spec.release();
         surfaceOn = false;
+        handler.removeCallbacks(seekGuard);
+        handler.removeCallbacks(rateFix);
+        afterSeek = null;
+        rateTry = 0;
         if (mp != null) { try { mp.release(); } catch (Exception e) { } mp = null; }
         prepared = false;
+    }
+
+    Runnable afterSeek;
+    final Runnable seekGuard = this::runAfterSeek;
+
+    void seekThen(int ms, Runnable then) {
+        handler.removeCallbacks(seekGuard);
+        afterSeek = then;
+        try { mp.seekTo(ms, MediaPlayer.SEEK_CLOSEST); } catch (Exception e) { runAfterSeek(); return; }
+        handler.postDelayed(seekGuard, 1500);
+    }
+
+    void runAfterSeek() {
+        handler.removeCallbacks(seekGuard);
+        Runnable r = afterSeek;
+        afterSeek = null;
+        if (r != null) r.run();
+    }
+
+    void seeked() {
+        if (afterSeek != null) { runAfterSeek(); return; }
+
+        if (isPlaying() && rate() != 1f && !applyRate()) keepRate();
     }
 
     void toggle() {
         if (isPlaying()) pause(); else resume();
     }
 
+    /** True only while playback was paused by the "Volume auto pause" setting. */
+    private boolean volPaused;
+
+    private void watchVolume(Context c) {
+        try {
+            c.registerReceiver(new BroadcastReceiver() {
+                @Override public void onReceive(Context x, Intent i) {
+                    if (i.getIntExtra("android.media.EXTRA_VOLUME_STREAM_TYPE", 3) == AudioManager.STREAM_MUSIC) volumeChanged();
+                }
+            }, new IntentFilter("android.media.VOLUME_CHANGED_ACTION"));
+        } catch (Exception e) { }
+        try {
+            c.getContentResolver().registerContentObserver(android.provider.Settings.System.CONTENT_URI, true,
+                    new android.database.ContentObserver(handler) {
+                        @Override public void onChange(boolean selfChange) { volumeChanged(); }
+                    });
+        } catch (Exception e) { }
+    }
+
+    void volumeChanged() {
+        if (!store.bool("vol_pause", false)) { volPaused = false; return; }
+        int v;
+        try { v = am.getStreamVolume(AudioManager.STREAM_MUSIC); } catch (Exception e) { return; }
+        if (v <= 0) {
+            if (isPlaying()) { pause(); volPaused = true; }
+        } else if (volPaused) {
+            volPaused = false;
+            resume();
+        }
+    }
+
     void pause() {
+        volPaused = false;
         resumeOnFocus = false;
         doPause();
     }
@@ -409,6 +519,7 @@ class Engine {
     }
 
     void resume() {
+        volPaused = false;
         if (mp == null) {
             if (cur() != null) playAt(idx, restPos);
             else if (!queue.isEmpty()) playAt(0);
@@ -417,7 +528,7 @@ class Engine {
         if (!prepared || isPlaying()) return;
         focus();
         startP(mp, rate());
-        if (ap != null) alignAp(pos()); // both were paused at slightly different spots: line them up again
+        if (ap != null) alignAp(pos());
         ensureService();
         startPosTick();
         fire();
@@ -434,17 +545,15 @@ class Engine {
     }
     void seek(int ms) {
         if (prepared && mp != null) {
-            try { mp.seekTo(ms); } catch (Exception e) { }
+            try { mp.seekTo(Math.max(0, ms), MediaPlayer.SEEK_CLOSEST); } catch (Exception e) { }
             if (ap != null) alignAp(ms);
             syncSession();
-        } else if (mp == null && cur() != null) { // restored, not started yet: the next start begins here
+        } else if (mp == null && cur() != null) {
             restPos = Math.max(0, ms);
             fire();
         }
     }
 
-    // ---------- playback speed ----------
-    /** Speed actually in effect (user's speed x temporary boost), clamped to what we offer. */
     float rate() { return Math.max(MIN_SPEED, Math.min(MAX_SPEED, speed * boost)); }
 
     static boolean setParams(MediaPlayer p, float r) {
@@ -454,46 +563,82 @@ class Engine {
         } catch (Exception e) { return false; }
     }
 
-    /**
-     * Starts a prepared player at the current speed. For MediaPlayer, setPlaybackParams with a non-zero speed on a
-     * prepared player IS start(), so this is also how the speed is carried over a pause / resume.
-     */
     void startP(MediaPlayer p, float r) {
         boolean ok = setParams(p, r);
         try { if (!ok || !p.isPlaying()) p.start(); } catch (Exception e) { }
+        if (ok) { if (p == mp) lastGoodSpeed = speed; }
+        else if (r != 1f) keepRate();
     }
 
-    /** Applies speed changes to a player that is playing (on a paused one it would start it, so it waits for resume). */
     boolean applyRate() {
         if (!isPlaying()) return true;
         float r = rate();
         boolean ok = setParams(mp, r);
-        if (ap != null && apReady) setParams(ap, r * apTrim);
+        if (ap != null && apReady && !setParams(ap, r * apTrim)) ok = false;
         return ok;
     }
 
-    /** Returns false when this device refused the speed (the old one is restored). */
-    boolean setSpeed(float v) {
-        float old = speed;
-        speed = Math.max(MIN_SPEED, Math.min(MAX_SPEED, Math.round(v * 100f) / 100f));
-        if (!applyRate()) {
-            speed = old;
+    float lastGoodSpeed = 1f;
+    int rateTry;
+    boolean rateRebuilt;
+    Consumer<Float> onRateRefused;
+
+    final Runnable rateFix = new Runnable() {
+        @Override public void run() {
+            if (!isPlaying()) { rateTry = 0; return; }
+            if (applyRate()) { rateTry = 0; lastGoodSpeed = speed; return; }
+            if (++rateTry <= 4) { handler.postDelayed(this, 120L << rateTry); return; }
+            rateTry = 0;
+            if (rate() == 1f) return;
+            if (!rateRebuilt && cur() != null) {
+                rateRebuilt = true;
+                playAt(idx, pos(), false);
+                return;
+            }
+            float bad = rate();
+            if (boost != 1f) boost = 1f; else speed = lastGoodSpeed;
+            store.p.edit().putFloat("speed", speed).apply();
             applyRate();
-            return false;
+            fire();
+            if (onRateRefused != null) onRateRefused.accept(bad);
         }
-        store.p.edit().putFloat("speed", speed).apply();
-        syncSession(); // no fire(): that rebuilds every list, far too much while a slider is being dragged
-        return true;
+    };
+
+    void reloadSettings() {
+        speed = Math.max(MIN_SPEED, Math.min(MAX_SPEED, store.p.getFloat("speed", 1f)));
+        lastGoodSpeed = speed;
+        if (isPlaying() && !applyRate()) keepRate();
+        spec.update();
+        fire();
     }
 
-    /** Temporary multiplier (press and hold on the player). Does not touch the saved speed. */
-    void setBoost(float b) {
-        boost = b;
-        if (!applyRate()) { boost = 1f; applyRate(); }
+    void recheckRate() {
+        if (rate() != 1f && isPlaying()) { handler.removeCallbacks(rateFix); handler.postDelayed(rateFix, 500); rateTry = 0; }
+    }
+
+    void keepRate() {
+        rateTry = 0;
+        handler.removeCallbacks(rateFix);
+        handler.postDelayed(rateFix, 150);
+    }
+
+    void setSpeed(float v) {
+        speed = Math.max(MIN_SPEED, Math.min(MAX_SPEED, Math.round(v * 100f) / 100f));
+        rateRebuilt = false;
+        store.p.edit().putFloat("speed", speed).apply();
+        if (applyRate()) { handler.removeCallbacks(rateFix); rateTry = 0; if (isPlaying()) lastGoodSpeed = speed; }
+        else keepRate();
         syncSession();
     }
 
-    // ---------- audio / video sync ----------
+    void setBoost(float b) {
+        boost = b;
+        rateRebuilt = false;
+        if (applyRate()) { handler.removeCallbacks(rateFix); rateTry = 0; }
+        else keepRate();
+        syncSession();
+    }
+
     boolean wantAp() {
         Media m = cur();
         return m != null && m.video && !audioMode && syncMs != 0 && mp != null;
@@ -509,7 +654,6 @@ class Engine {
         applySync();
     }
 
-    /** Makes the second player exist exactly when it is needed. */
     void applySync() {
         if (!prepared || mp == null) return;
         if (wantAp()) { if (ap == null) makeAp(); }
@@ -532,19 +676,22 @@ class Engine {
                     .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                     .setUsage(AudioAttributes.USAGE_MEDIA).build());
             p.setWakeMode(ctx, PowerManager.PARTIAL_WAKE_LOCK);
-            p.setDataSource(ctx, m.uri); // no surface: it only produces the sound
+            p.setDataSource(ctx, m.uri);
             p.setOnPreparedListener(x -> {
                 if (x != ap) return;
                 apReady = true;
                 applyVol();
                 alignAp(pos());
-                fire(); // the spectrum now listens to this player
+                fire();
             });
-            p.setOnCompletionListener(x -> { }); // the picture decides when the item is over
+            p.setOnSeekCompleteListener(x -> {
+                if (x == ap && apReady && isPlaying() && rate() * apTrim != 1f && !setParams(x, rate() * apTrim)) keepRate();
+            });
+            p.setOnCompletionListener(x -> { });
             p.setOnErrorListener((x, a, b) -> { if (x == ap) { dropAp(); fire(); } return true; });
             p.prepareAsync();
         } catch (Exception e) { dropAp(); return; }
-        applyVol(); // picture muted from now on
+        applyVol();
         handler.removeCallbacks(syncLoop);
         handler.postDelayed(syncLoop, 250);
     }
@@ -557,10 +704,9 @@ class Engine {
         apReady = false;
         apTrim = 1f;
         if (p != null) { try { p.release(); } catch (Exception e) { } }
-        applyVol(); // the picture's own (in step) sound again
+        applyVol();
     }
 
-    /** Puts the sound where it belongs for picture position `base`, and starts it if the picture is playing. */
     void alignAp(int base) {
         if (ap == null || !apReady || mp == null || !prepared) return;
         handler.removeCallbacks(apGo);
@@ -568,7 +714,7 @@ class Engine {
         apTrim = 1f;
         int t = base + syncMs;
         try {
-            if (t < 0) { // sound has to wait for the picture
+            if (t < 0) {
                 ap.seekTo(0);
                 if (ap.isPlaying()) ap.pause();
                 if (isPlaying()) handler.postDelayed(apGo, (long) (-t / rate()));
@@ -580,13 +726,12 @@ class Engine {
         } catch (Exception e) { }
     }
 
-    /** Keeps the sound at exactly picture + syncMs: small drifts are eased out by running the sound a hair fast / slow. */
     final Runnable syncLoop = new Runnable() {
         @Override public void run() {
             if (ap == null) return;
             try {
                 if (apReady && isPlaying() && ap.isPlaying()) {
-                    int err = ap.getCurrentPosition() - (mp.getCurrentPosition() + syncMs); // + = sound is too far ahead
+                    int err = ap.getCurrentPosition() - (mp.getCurrentPosition() + syncMs);
                     float trim = apTrim;
                     if (Math.abs(err) > 300) {
                         if (SystemClock.uptimeMillis() - lastAlign > 1500) { alignAp(pos()); trim = 1f; }
@@ -596,9 +741,11 @@ class Engine {
                     if (trim != apTrim) { apTrim = trim; setParams(ap, rate() * trim); }
                 }
             } catch (Exception e) { }
-            handler.postDelayed(this, 250);
+            handler.postDelayed(this, lowPower() ? 1000 : 250);
         }
     };
+
+    final java.util.ArrayDeque<Integer> backStack = new java.util.ArrayDeque<>();
 
     void next(boolean auto) {
         if (queue.isEmpty()) return;
@@ -611,19 +758,33 @@ class Engine {
                 if (repeat == 1 || !auto) i = 0; else { stopAtEnd(); return; }
             }
         }
+        if (idx >= 0) { backStack.push(idx); while (backStack.size() > 100) backStack.removeLast(); }
         playAt(i);
     }
 
     void prev() {
         if (queue.isEmpty()) return;
-        if (pos() > 3000) { seek(0); return; }
-        int i = idx - 1;
-        if (i < 0) i = queue.size() - 1;
+        int i = -1;
+        while (!backStack.isEmpty()) {
+            int b = backStack.pop();
+            if (b >= 0 && b < queue.size() && b != idx) { i = b; break; }
+        }
+        if (i < 0) {
+            if (shuffle && queue.size() > 1) {
+                do { i = rnd.nextInt(queue.size()); } while (i == idx);
+            } else {
+                i = idx - 1;
+                if (i < 0) i = queue.size() - 1;
+            }
+        }
         playAt(i);
     }
 
     void done() {
-        if (repeat == 2) { seek(0); startP(mp, rate()); if (ap != null) alignAp(0); return; }
+        if (repeat == 2) {
+            seekThen(0, () -> { if (mp != null && prepared) { startP(mp, rate()); if (ap != null) alignAp(0); } });
+            return;
+        }
         if (!store.bool("autonext", true)) { stopAtEnd(); return; }
         next(true);
     }
@@ -635,29 +796,65 @@ class Engine {
         fire();
     }
 
-    void addToQueue(Media m) {
+    boolean dupOk() { return store.bool("q_dup", false); }
+
+    boolean inQueue(Media m) {
+        String k = m.key();
+        for (Media q : queue) if (q.key().equals(k)) return true;
+        return false;
+    }
+
+    boolean addToQueue(Media m) {
+        if (!dupOk() && inQueue(m)) return false;
         qDirty = true;
-        if (queue.isEmpty()) { queue.add(m); playAt(0); return; }
+        if (queue.isEmpty()) { queue.add(m); playAt(0); return true; }
         queue.add(m);
         fire();
+        return true;
     }
 
-    void addAllToQueue(List<Media> l) {
-        if (l.isEmpty()) return;
+    int addAllToQueue(List<Media> l) {
+        List<Media> add = l;
+        if (!dupOk()) {
+            Set<String> have = new HashSet<>();
+            for (Media q : queue) have.add(q.key());
+            add = new ArrayList<>();
+            for (Media m : l) if (have.add(m.key())) add.add(m);
+        }
+        if (add.isEmpty()) return 0;
         qDirty = true;
         boolean empty = queue.isEmpty();
-        queue.addAll(l);
+        queue.addAll(add);
         if (empty) playAt(0); else fire();
+        return add.size();
     }
 
-    void playNext(Media m) {
+    static final int NEXT_ADDED = 0, NEXT_MOVED = 1, NEXT_SAME = 2;
+
+    int playNext(Media m) {
+        if (queue.isEmpty()) { qDirty = true; queue.add(m); playAt(0); return NEXT_ADDED; }
+        if (!dupOk()) {
+            String k = m.key();
+            if (cur() != null && cur().key().equals(k)) return NEXT_SAME;
+            int j = -1;
+            for (int i = 0; i < queue.size(); i++) if (queue.get(i).key().equals(k)) { j = i; break; }
+            if (j >= 0) {
+                if (j != idx + 1) {
+                    qDirty = true;
+                    Media q = queue.remove(j);
+                    if (j < idx) idx--;
+                    queue.add(idx + 1, q);
+                    fire();
+                }
+                return NEXT_MOVED;
+            }
+        }
         qDirty = true;
-        if (queue.isEmpty()) { queue.add(m); playAt(0); return; }
-        queue.add(idx + 1, m);
+        queue.add(Math.min(queue.size(), idx + 1), m);
         fire();
+        return NEXT_ADDED;
     }
 
-    /** Drag & drop in the play queue. Does not restart anything; keeps idx pointing at the playing item. */
     void moveQueue(int from, int to) {
         if (from == to || from < 0 || to < 0 || from >= queue.size() || to >= queue.size()) return;
         qDirty = true;
@@ -669,7 +866,6 @@ class Engine {
         else if (from > idx && to <= idx) idx++;
     }
 
-    /** Removes one queue entry. Removing the playing one moves on to the entry that took its place. */
     void removeAt(int i) {
         if (i < 0 || i >= queue.size()) return;
         qDirty = true;
@@ -684,7 +880,6 @@ class Engine {
         playAt(i < queue.size() ? i : 0);
     }
 
-    /** Empties the whole play queue and stops playback. */
     void clearQueue() {
         qDirty = true;
         free();
@@ -693,16 +888,25 @@ class Engine {
         fire();
     }
 
-    /** Removes several queue entries (positions); the playing one last so playback only jumps once. */
     void removeMany(java.util.Collection<Integer> which) {
-        java.util.ArrayList<Integer> l = new java.util.ArrayList<>(new java.util.TreeSet<>(which));
-        boolean curSel = false;
-        for (int k = l.size() - 1; k >= 0; k--) {
-            int i = l.get(k);
-            if (i == idx) { curSel = true; continue; }
-            removeAt(i);
+        java.util.BitSet gone = new java.util.BitSet();
+        for (int i : which) if (i >= 0 && i < queue.size()) gone.set(i);
+        if (gone.isEmpty()) return;
+        qDirty = true;
+        boolean curGone = idx >= 0 && gone.get(idx);
+        ArrayList<Media> keep = new ArrayList<>(Math.max(0, queue.size() - gone.cardinality()));
+        int newIdx = -1, firstAfter = -1;
+        for (int i = 0; i < queue.size(); i++) {
+            if (gone.get(i)) continue;
+            if (i == idx) newIdx = keep.size();
+            else if (i > idx && firstAfter < 0) firstAfter = keep.size();
+            keep.add(queue.get(i));
         }
-        if (curSel) removeAt(idx);
+        queue.clear();
+        queue.addAll(keep);
+        if (queue.isEmpty()) { free(); idx = -1; fire(); return; }
+        if (!curGone) { idx = newIdx; fire(); return; }
+        playAt(firstAfter >= 0 ? firstAfter : 0);
     }
 
     void remove(String key) {
@@ -728,18 +932,12 @@ class Engine {
         fire();
     }
 
-    // ---------- video output ----------
-    // The video is decoded into a Surface that belongs to the ENGINE and lives as long as the process does;
-    // the player screen just shows it (TextureView). The MediaPlayer's display is therefore set once when a
-    // video starts and never touched again when the screen closes / reopens. Changing the display of a
-    // playing video makes Android flush the audio and re-seek the video, which is the pause / pulsing you
-    // heard every time the app was left and entered again.
     SurfaceTexture vtex;
     Surface vsurf;
 
     Surface videoSurface() {
         if (vsurf == null) {
-            vtex = new SurfaceTexture(false); // detached, so any TextureView can adopt it
+            vtex = new SurfaceTexture(false);
             vsurf = new Surface(vtex);
         }
         return vsurf;

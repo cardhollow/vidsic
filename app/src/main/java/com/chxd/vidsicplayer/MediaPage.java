@@ -29,14 +29,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/**
- * One page for Audio or Video.
- * Tabs: Audios/Videos | Folders | Authors | Albums (audio only) | Playlist | Favorite
- * Under the tabs: sort, list/grid switch and multi-select.
- */
 class MediaPage {
     static final int HDR = 0, MEDIA = 1, FOLDER = 2, PL = 3, ACT = 4, EMPTY = 5, SUG = 6, GRID = 7, N = 8;
-    static final int T_ALL = 0, T_FOLDERS = 1, T_AUTHORS = 2, T_ALBUMS = 3, T_PL = 4, T_FAV = 5;
+    static final int T_ALL = 0, T_FOLDERS = 1, T_AUTHORS = 2, T_ALBUMS = 3, T_PL = 4, T_FAV = 5, T_GENRES = 6;
     static final String[] SORTS = {"Name", "Date", "Duration", "Size", "Most played"};
 
     static class Row {
@@ -49,7 +44,6 @@ class MediaPage {
         List<Row> cells;
     }
 
-    /** A folder / author / album / playlist entry. */
     static class G {
         String title, sub;
         int icon;
@@ -71,8 +65,9 @@ class MediaPage {
     final ImageView sortBtn, viewBtn, selBtn, allBtn;
     final LinearLayout actionBar;
     final ListView lv;
+    HorizontalScrollView tabScroll;
     final ArrayList<Row> rows = new ArrayList<>();
-    final ArrayList<Media> shown = new ArrayList<>(); // media rows in display order
+    final ArrayList<Media> shown = new ArrayList<>();
     final LinkedHashSet<String> sel = new LinkedHashSet<>();
     final BaseAdapter ad;
     int tab = T_ALL;
@@ -89,7 +84,6 @@ class MediaPage {
         root.setFocusableInTouchMode(true);
         root.setDescendantFocusability(ViewGroup.FOCUS_BEFORE_DESCENDANTS);
 
-        // search bar
         LinearLayout sb = new LinearLayout(a);
         sb.setGravity(Gravity.CENTER_VERTICAL);
         sb.setBackground(Ui.shape(Ui.SURF, 24, a));
@@ -126,14 +120,14 @@ class MediaPage {
         search.setOnFocusChangeListener((v, f) -> refresh());
         search.setOnEditorActionListener((v, id, ev) -> { unfocus(); return true; });
 
-        // header tabs (scrollable: there can be six of them)
         tabIds = video ? new int[]{T_ALL, T_FOLDERS, T_AUTHORS, T_PL, T_FAV}
-                : new int[]{T_ALL, T_FOLDERS, T_AUTHORS, T_ALBUMS, T_PL, T_FAV};
+                : new int[]{T_ALL, T_FOLDERS, T_AUTHORS, T_ALBUMS, T_GENRES, T_PL, T_FAV};
         String[] names = video ? new String[]{"Videos", "Folders", "Authors", "Playlist", "Favorite"}
-                : new String[]{"Audios", "Folders", "Authors", "Albums", "Playlist", "Favorite"};
+                : new String[]{"Audios", "Folders", "Authors", "Albums", "Genres", "Playlist", "Favorite"};
         tabs = new TextView[tabIds.length];
         bars = new View[tabIds.length];
         HorizontalScrollView hs = new HorizontalScrollView(a);
+        tabScroll = hs;
         hs.setHorizontalScrollBarEnabled(false);
         hs.setOverScrollMode(View.OVER_SCROLL_NEVER);
         LinearLayout tb = new LinearLayout(a);
@@ -156,7 +150,6 @@ class MediaPage {
         hs.addView(tb);
         root.addView(hs, new LinearLayout.LayoutParams(Ui.MATCH, Ui.WRAP));
 
-        // tool row: [sorted by ...] ........ [sort] [list/grid] [select]
         LinearLayout tool = new LinearLayout(a);
         tool.setGravity(Gravity.CENTER_VERTICAL);
         tool.setPadding(Ui.dp(a, 16), 0, Ui.dp(a, 6), 0);
@@ -191,9 +184,9 @@ class MediaPage {
             public View getView(int i, View cv, ViewGroup p) { return build(rows.get(i)); }
         };
         lv.setAdapter(ad);
+        enableSwipe(lv);
         root.addView(lv, new LinearLayout.LayoutParams(Ui.MATCH, 0, 1));
 
-        // multi-select action bar: Play | Queue | Playlist | Favorite | Delete
         actionBar = new LinearLayout(a);
         actionBar.setBackgroundColor(Ui.SURF2);
         actionBar.setVisibility(View.GONE);
@@ -201,9 +194,39 @@ class MediaPage {
         actionBar.addView(act(R.drawable.ic_add_queue, "Queue", Ui.TXT, this::actQueue), new LinearLayout.LayoutParams(0, Ui.WRAP, 1));
         actionBar.addView(act(R.drawable.ic_playlist, "Playlist", Ui.TXT, this::actPlaylist), new LinearLayout.LayoutParams(0, Ui.WRAP, 1));
         actionBar.addView(act(R.drawable.ic_heart, "Favorite", Ui.TXT, this::actFav), new LinearLayout.LayoutParams(0, Ui.WRAP, 1));
+        actionBar.addView(act(R.drawable.ic_edit, "Edit", Ui.TXT, this::actEdit), new LinearLayout.LayoutParams(0, Ui.WRAP, 1));
         actionBar.addView(act(R.drawable.ic_delete, "Delete", Ui.RED, this::actDelete), new LinearLayout.LayoutParams(0, Ui.WRAP, 1));
         root.addView(actionBar, new LinearLayout.LayoutParams(Ui.MATCH, Ui.WRAP));
         refresh();
+    }
+
+
+    /** Swipe left = next tab, swipe right = previous tab. */
+    void swipeTab(int dir) {
+        int i = 0;
+        for (int k = 0; k < tabIds.length; k++) if (tabIds[k] == tab) i = k;
+        int j = i + dir;
+        if (j < 0 || j >= tabIds.length) return;
+        tab = tabIds[j]; openFolder = null; openGrp = null; openPl = null;
+        exitSelect(false); unfocus(); refresh();
+        centerTab(j);
+    }
+
+    void centerTab(int j) {
+        final View col = (View) tabs[j].getParent();
+        tabScroll.post(() -> tabScroll.smoothScrollTo(Math.max(0, col.getLeft() - (tabScroll.getWidth() - col.getWidth()) / 2), 0));
+    }
+
+    void enableSwipe(ListView list) {
+        final android.view.GestureDetector gd = new android.view.GestureDetector(a, new android.view.GestureDetector.SimpleOnGestureListener() {
+            @Override public boolean onFling(android.view.MotionEvent e1, android.view.MotionEvent e2, float vx, float vy) {
+                if (e1 == null || e2 == null) return false;
+                float dx = e2.getX() - e1.getX(), dy = e2.getY() - e1.getY();
+                if (Math.abs(dx) > Ui.dp(a, 80) && Math.abs(dx) > Math.abs(dy) * 2f) swipeTab(dx < 0 ? 1 : -1);
+                return false;
+            }
+        });
+        list.setOnTouchListener((v, ev) -> { gd.onTouchEvent(ev); return false; });
     }
 
     String sk() { return s.sk(video); }
@@ -223,7 +246,6 @@ class MediaPage {
         return false;
     }
 
-    // ---------- sorting ----------
     Comparator<Media> mediaCmp() {
         final int mode = s.sortMode(video);
         Comparator<Media> c = (x, y) -> {
@@ -346,7 +368,6 @@ class MediaPage {
         return v;
     }
 
-    // ---------- multi-select ----------
     void exitSelect(boolean redraw) {
         if (!selecting && sel.isEmpty()) return;
         selecting = false;
@@ -394,8 +415,10 @@ class MediaPage {
     void actPlay() { List<Media> l = picked(); exitSelect(true); a.playMedia(l, 0); }
     void actQueue() {
         List<Media> l = picked();
-        a.engine.addAllToQueue(l);
-        a.toast(l.size() + (l.size() == 1 ? " item" : " items") + " added to queue");
+        int n = a.engine.addAllToQueue(l);
+        int skipped = l.size() - n;
+        a.toast(n == 0 ? "Already in queue"
+                : n + (n == 1 ? " item" : " items") + " added to queue" + (skipped > 0 ? ", " + skipped + " already in it" : ""));
         exitSelect(true);
     }
     void actPlaylist() { a.pickPlaylist(picked(), () -> exitSelect(true)); }
@@ -409,9 +432,9 @@ class MediaPage {
         a.refreshAll();
         a.player.changed();
     }
+    void actEdit() { a.meta.open(picked(), () -> exitSelect(true)); }
     void actDelete() { a.confirmDeleteMany(picked(), () -> exitSelect(true)); }
 
-    // ---------- rows ----------
     Row hdr(String t, String act, Runnable r) {
         Row x = new Row(); x.type = HDR; x.title = t; x.action = act; x.click = r; return x;
     }
@@ -443,6 +466,9 @@ class MediaPage {
             bars[i].setBackgroundColor(tabIds[i] == tab ? Ui.ACC : Color.TRANSPARENT);
         }
         List<Media> all = a.media(video);
+        scopeName = null;
+        List<Media> scoped = s.bool("search_scope", false) ? scope() : null;
+        search.setHint(scoped != null ? "Search in " + scopeName : video ? "Search videos" : "Search audios");
         String q = search.getText().toString().trim().toLowerCase();
         List<String> past = s.list(sk());
 
@@ -459,7 +485,8 @@ class MediaPage {
             int n = 0;
             for (String p : past) if (p.toLowerCase().contains(q) && !p.equalsIgnoreCase(q) && n++ < 3) sug(p);
             List<Media> res = new ArrayList<>();
-            for (Media m : all)
+            List<Media> pool = scoped != null ? scoped : all;
+            for (Media m : pool)
                 if (m.title.toLowerCase().contains(q) || m.artist.toLowerCase().contains(q)) res.add(m);
             res = sorted(res);
             rows.add(hdr("Results (" + res.size() + ")", null, null));
@@ -494,6 +521,7 @@ class MediaPage {
                     x.sub = count(x.items.size());
                     x.icon = R.drawable.ic_folder;
                     x.click = () -> { openFolder = key; refresh(); };
+                    x.more = groupMore(x.title, x.items, null, Group.FOLDER, key);
                     gs.add(x);
                 }
                 addGroups(gs);
@@ -502,16 +530,17 @@ class MediaPage {
                 rows.add(hdr(l.isEmpty() ? "Folder" : l.get(0).folder, "Back", () -> { openFolder = null; refresh(); }));
                 media(l, l, null);
             }
-        } else if (tab == T_AUTHORS || tab == T_ALBUMS) {
-            final boolean authors = tab == T_AUTHORS;
+        } else if (tab == T_AUTHORS || tab == T_ALBUMS || tab == T_GENRES) {
+            final boolean authors = tab == T_AUTHORS, genres = tab == T_GENRES;
             Map<String, List<Media>> g = new LinkedHashMap<>();
             for (Media m : all) {
-                String k = authors ? m.artist : (m.album == null ? "Unknown album" : m.album);
+                String k = authors ? m.artist : genres ? (m.genre == null || m.genre.isEmpty() ? "Unknown genre" : m.genre)
+                        : (m.album == null || m.album.isEmpty() ? "Unknown album" : m.album);
                 if (!g.containsKey(k)) g.put(k, new ArrayList<Media>());
                 g.get(k).add(m);
             }
             if (openGrp == null) {
-                if (g.isEmpty()) rows.add(empty(authors ? "No authors" : "No albums"));
+                if (g.isEmpty()) rows.add(empty(authors ? "No authors" : genres ? "No genres" : "No albums"));
                 List<G> gs = new ArrayList<>();
                 for (Map.Entry<String, List<Media>> en : g.entrySet()) {
                     final String key = en.getKey();
@@ -519,13 +548,14 @@ class MediaPage {
                     x.title = key;
                     x.items = en.getValue();
                     x.sub = count(x.items.size());
-                    if (!authors) {
+                    if (tab == T_ALBUMS) {
                         String ar = x.items.get(0).artist;
                         for (Media m : x.items) if (!m.artist.equals(ar)) { ar = "Various artists"; break; }
                         x.sub += "  •  " + ar;
                     }
                     x.icon = authors ? R.drawable.ic_person : R.drawable.ic_album;
                     x.click = () -> { openGrp = key; refresh(); };
+                    x.more = groupMore(key, x.items, authors ? null : genres ? "genre" : "album", authors ? Group.ARTIST : genres ? Group.GENRE : Group.ALBUM, key);
                     gs.add(x);
                 }
                 addGroups(gs);
@@ -551,6 +581,12 @@ class MediaPage {
                     g.icon = R.drawable.ic_playlist;
                     g.click = () -> { openPl = n; refresh(); };
                     g.more = () -> new Ui.Sheet(a, n, "Playlist")
+                            .item(R.drawable.ic_add, "Add to home screen", Ui.TXT, () -> HomeAdd.show(a, new Group(Group.PLAYLIST, video, n), n))
+                            .item(R.drawable.ic_edit, "Rename playlist", Ui.TXT, () -> a.promptName("Rename playlist", n, nn -> {
+                                if (nn.equals(n)) return;
+                                if (!s.renamePlaylist(video, n, nn)) a.toast("A playlist with that name already exists");
+                                refresh();
+                            }))
                             .item(R.drawable.ic_delete, "Delete playlist", Ui.RED, () ->
                                     a.confirmDanger("Delete playlist?", "\"" + n + "\" will be deleted. The " + (video ? "videos" : "audios") + " in it stay on your device.",
                                             "Delete", () -> { s.deletePlaylist(video, n); refresh(); })).show();
@@ -571,7 +607,7 @@ class MediaPage {
             }
         } else {
             List<Media> fav = sorted(resolve(s.list("fav")));
-            rows.add(hdr("Favorites (" + fav.size() + ")", null, null));
+            rows.add(hdr("Favorites (" + fav.size() + ")", "Add to home", () -> HomeAdd.show(a, new Group(Group.FAV, video, ""), "Favorites")));
             media(fav, fav, null);
         }
         gridify();
@@ -579,10 +615,93 @@ class MediaPage {
         ad.notifyDataSetChanged();
     }
 
+    String scopeName;
+
+    String grpKey(Media m) {
+        if (tab == T_AUTHORS) return m.artist;
+        if (tab == T_GENRES) return m.genre == null || m.genre.isEmpty() ? "Unknown genre" : m.genre;
+        return m.album == null || m.album.isEmpty() ? "Unknown album" : m.album;
+    }
+
+    /** Items of the group that is open right now (folder, author, album, genre, playlist, favorites), or null when none is. */
+    List<Media> scope() {
+        List<Media> out = new ArrayList<>();
+        if (tab == T_FOLDERS && openFolder != null) {
+            for (Media m : a.media(video, true)) {
+                if (m.folderHidden && !s.bool("hid_f", false)) continue;
+                if (openFolder.equals(m.path)) out.add(m);
+            }
+            scopeName = out.isEmpty() ? "folder" : out.get(0).folder;
+        } else if ((tab == T_AUTHORS || tab == T_ALBUMS || tab == T_GENRES) && openGrp != null) {
+            for (Media m : a.media(video)) if (openGrp.equals(grpKey(m))) out.add(m);
+            scopeName = openGrp;
+        } else if (tab == T_PL && openPl != null) {
+            out = resolve(s.items(video, openPl));
+            scopeName = openPl;
+        } else if (tab == T_FAV) {
+            out = resolve(s.list("fav"));
+            scopeName = "favorites";
+        } else {
+            return null;
+        }
+        return out;
+    }
+
+    void openGroup(Group g) {
+        exitSelect(false);
+        openFolder = null; openGrp = null; openPl = null;
+        switch (g.kind) {
+            case Group.FOLDER: tab = T_FOLDERS; openFolder = g.name; break;
+            case Group.ARTIST: tab = T_AUTHORS; openGrp = g.name; break;
+            case Group.ALBUM: tab = T_ALBUMS; openGrp = g.name; break;
+            case Group.GENRE: tab = T_GENRES; openGrp = g.name; break;
+            case Group.PLAYLIST: tab = T_PL; openPl = g.name; break;
+            case Group.FAV: tab = T_FAV; break;
+            default: tab = T_ALL; break;
+        }
+        refresh();
+    }
+
+    Runnable groupMore(final String name, final List<Media> items, final String field, final String kind, final String id) {
+        return () -> {
+            Ui.Sheet sh = new Ui.Sheet(a, name, count(items.size()));
+            sh.item(R.drawable.ic_play, "Play", Ui.TXT, () -> a.playMedia(new ArrayList<>(sorted(items)), 0));
+            sh.item(R.drawable.ic_shuffle, "Play shuffled", Ui.TXT, () -> {
+                List<Media> l = new ArrayList<>(items);
+                Collections.shuffle(l);
+                a.playMedia(l, 0);
+            });
+            sh.item(R.drawable.ic_add_queue, "Add to queue", Ui.TXT, () -> {
+                int n = a.engine.addAllToQueue(items);
+                a.toast(n == 0 ? "Already in queue" : n + (n == 1 ? " item" : " items") + " added to queue");
+            });
+            sh.item(R.drawable.ic_playlist, "Add to playlist", Ui.TXT, () -> a.pickPlaylist(new ArrayList<>(items), null));
+            sh.item(R.drawable.ic_add, "Add to home screen", Ui.TXT, () -> HomeAdd.show(a, new Group(kind, video, id), name));
+            if (field != null) sh.item(R.drawable.ic_edit, "Rename " + field, Ui.TXT, () ->
+                    a.promptName("Rename " + field, name.startsWith("Unknown ") ? "" : name, nn -> {
+                        for (Media m : new ArrayList<>(items)) {
+                            s.setMeta(m.key(), field, nn);
+                            applyField(m, field, nn);
+                            Media lib = a.byKey.get(m.key());
+                            if (lib != null) applyField(lib, field, nn);
+                            for (Media q : a.engine.queue) if (q.key().equals(m.key())) applyField(q, field, nn);
+                        }
+                        if (nn.equals(openGrp) || name.equals(openGrp)) openGrp = nn;
+                        a.refreshAll();
+                        a.toast("Renamed");
+                    }));
+            sh.show();
+        };
+    }
+
+    private static void applyField(Media m, String field, String v) {
+        if ("album".equals(field)) m.album = v; else if ("genre".equals(field)) m.genre = v;
+    }
+
     void sug(String p) {
         Row x = new Row(); x.type = SUG; x.title = p;
         x.click = () -> { search.setText(p); search.setSelection(p.length()); unfocus(); };
-        x.more = () -> { // the x at the right: forget this search right away
+        x.more = () -> {
             List<String> l = s.list(sk());
             l.remove(p);
             s.save(sk(), l);
@@ -595,16 +714,15 @@ class MediaPage {
         sortBtn.setVisibility(selecting ? View.GONE : View.VISIBLE);
         viewBtn.setVisibility(selecting ? View.GONE : View.VISIBLE);
         allBtn.setVisibility(selecting ? View.VISIBLE : View.GONE);
-        selBtn.setImageResource(selecting ? R.drawable.ic_close : R.drawable.ic_select);
+        Ic.set(selBtn, selecting ? R.drawable.ic_close : R.drawable.ic_select);
         selBtn.setColorFilter(selecting ? Ui.ACC : Ui.TXT);
-        viewBtn.setImageResource(s.grid(video) ? R.drawable.ic_view_list : R.drawable.ic_grid);
+        Ic.set(viewBtn, s.grid(video) ? R.drawable.ic_view_list : R.drawable.ic_grid);
         actionBar.setVisibility(selecting ? View.VISIBLE : View.GONE);
         if (selecting) info.setText(sel.size() + " selected");
         else info.setText("Sorted by " + SORTS[s.sortMode(video)] + (s.sortAsc(video) ? " ↑" : " ↓"));
         info.setTextColor(selecting ? Ui.ACC : Ui.SUB);
     }
 
-    // ---------- grid ----------
     int cols() {
         float dp = a.getResources().getDisplayMetrics().widthPixels / a.getResources().getDisplayMetrics().density;
         return Math.max(2, Math.round(dp / 125f));
@@ -672,7 +790,7 @@ class MediaPage {
             pic = new FrameLayout(c);
             pic.setBackground(Ui.shape(Ui.SURF2, 12, c));
             ImageView ic = new ImageView(c);
-            ic.setImageResource(r.icon);
+            Ic.set(ic, r.icon);
             ic.setColorFilter(Ui.ACC);
             int ip = side / 4;
             ic.setPadding(ip, ip, ip, ip);
@@ -694,7 +812,6 @@ class MediaPage {
         return box;
     }
 
-    // ---------- row views ----------
     View build(Row r) {
         Context c = a;
         LinearLayout row = new LinearLayout(c);
@@ -774,7 +891,7 @@ class MediaPage {
                 row.setOnClickListener(v -> r.click.run());
                 return row;
             }
-            default: { // MEDIA
+            default: {
                 final Media m = r.m;
                 row.setPadding(Ui.dp(c, 16), Ui.dp(c, 6), Ui.dp(c, 4), Ui.dp(c, 6));
                 row.setBackground(Ui.rip(0, 0, c));
@@ -795,7 +912,7 @@ class MediaPage {
                 row.addView(col, new LinearLayout.LayoutParams(0, Ui.WRAP, 1));
                 if (s.isFav(m)) row.addView(Ui.icon(c, R.drawable.ic_heart_fill, Ui.ACC, 16));
                 if (now) {
-                    // audio spectrum for whatever is playing, right before the 3 dots
+
                     LinearLayout.LayoutParams ep = new LinearLayout.LayoutParams(Ui.dp(c, 18), Ui.dp(c, 16));
                     ep.setMargins(Ui.dp(c, 10), 0, Ui.dp(c, 2), 0);
                     row.addView(new Ui.Eq(c, Ui.ACC, a.engine.isPlaying()), ep);

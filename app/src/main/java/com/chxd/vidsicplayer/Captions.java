@@ -10,10 +10,6 @@ import java.util.Comparator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/**
- * Subtitles: parses SubRip (.srt), WebVTT (.vtt), TTML / DFXP / XML (.ttml .dfxp .xml), SubStation Alpha (.ass .ssa),
- * YouTube SBV (.sbv), lyrics (.lrc) and MicroDVD (.sub), and answers "what is on screen at this time".
- */
 final class Captions {
     static class Cue {
         long s, e;
@@ -25,7 +21,6 @@ final class Captions {
 
     final ArrayList<Cue> cues = new ArrayList<>();
 
-    /** Bytes of a subtitle file -> text. UTF-8 (with or without BOM), else Windows-1252. */
     static String decode(byte[] b) {
         int off = 0;
         if (b.length >= 3 && (b[0] & 0xFF) == 0xEF && (b[1] & 0xFF) == 0xBB && (b[2] & 0xFF) == 0xBF) off = 3;
@@ -57,14 +52,13 @@ final class Captions {
     static final Pattern SBV = Pattern.compile("^\\s*\\d+:\\d{2}:\\d{2}\\.\\d+\\s*,\\s*\\d+:\\d{2}:\\d{2}\\.\\d+\\s*$");
     static final Pattern DVD = Pattern.compile("^\\s*\\{(\\d+)\\}\\{(\\d*)\\}(.*)$");
 
-    /** Detects the format and parses it. Returns null when the text holds no cues at all. */
     static Captions parse(String text) {
         if (text == null) return null;
         String head = text.length() > 4000 ? text.substring(0, 4000) : text;
         Captions c;
         if (head.contains("<tt") || head.contains("<?xml") || head.contains("<p ")) c = parseTtml(text);
         else if (text.contains("[Events]")) c = parseAss(text);
-        else if (Pattern.compile("(?m)^\\s*\\[\\d{1,3}:\\d{2}").matcher(head).find()) c = parseLrc(text); // may start with [ar:..] tags
+        else if (Pattern.compile("(?m)^\\s*\\[\\d{1,3}:\\d{2}").matcher(head).find()) c = parseLrc(text);
         else if (DVD.matcher(firstLine(text)).find()) c = parseDvd(text);
         else if (SBV.matcher(firstLine(text)).find()) c = parseSbv(text);
         else c = parseSrt(text);
@@ -107,12 +101,9 @@ final class Captions {
                 .replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&");
     }
 
-    // ---------- TTML / DFXP ----------
-    // <p begin end dur> (TTML), <p t d> in milliseconds (YouTube timedtext v3), <text start dur> in seconds (timedtext v1)
     static final Pattern TT_P = Pattern.compile("<(p|text)\\b([^>]*[^/>])?>(.*?)</\\1>", Pattern.DOTALL);
     static final Pattern TT_ATTR = Pattern.compile("(?<![\\w:-])(begin|end|dur|start|t|d)\\s*=\\s*[\"']([^\"']*)[\"']");
 
-    /** Clock time (h:m:s.f), offset time (12.5s, 300ms, 90000t) or frames (h:m:s:f at 24 fps). */
     static long ttTime(String v, double tickRate) {
         v = v.trim();
         try {
@@ -131,7 +122,7 @@ final class Captions {
             if (p.length >= 3) {
                 double sec = Double.parseDouble(p[2]);
                 long ms = ((Long.parseLong(p[0]) * 60 + Long.parseLong(p[1])) * 60) * 1000 + Math.round(sec * 1000);
-                if (p.length == 4) ms += Math.round(Long.parseLong(p[3]) * 1000 / 24.0); // frames
+                if (p.length == 4) ms += Math.round(Long.parseLong(p[3]) * 1000 / 24.0);
                 return ms;
             }
             return Math.round(Double.parseDouble(v) * 1000);
@@ -156,7 +147,7 @@ final class Captions {
                 else msd = v;
             }
             long s0, e0;
-            if (ms0 != null) { // plain milliseconds
+            if (ms0 != null) {
                 try { s0 = Long.parseLong(ms0.trim()); e0 = s0 + (msd == null ? 3000 : Long.parseLong(msd.trim())); }
                 catch (Exception ex) { continue; }
             } else {
@@ -175,7 +166,6 @@ final class Captions {
         return c;
     }
 
-    // ---------- SubStation Alpha ----------
     static long assTime(String v) {
         Matcher m = Pattern.compile("(\\d+):(\\d{1,2}):(\\d{1,2})[.:](\\d{1,3})").matcher(v.trim());
         if (!m.find()) return -1;
@@ -202,7 +192,7 @@ final class Captions {
                     else if (k.equalsIgnoreCase("Text")) iT = i;
                 }
             } else if (t.regionMatches(true, 0, "Dialogue:", 0, 9)) {
-                String[] f = t.substring(9).split(",", n); // the text may itself contain commas
+                String[] f = t.substring(9).split(",", n);
                 if (f.length <= iT) continue;
                 String tx = f[iT].replaceAll("\\{[^}]*\\}", "").replace("\\N", "\n").replace("\\n", "\n").replace("\\h", " ");
                 c.add(assTime(f[iS]), assTime(f[iE]), tx);
@@ -211,7 +201,6 @@ final class Captions {
         return c;
     }
 
-    // ---------- SBV (YouTube) ----------
     static Captions parseSbv(String text) {
         Captions c = new Captions();
         for (String blk : text.replace("\r\n", "\n").replace('\r', '\n').split("\n\\s*\n")) {
@@ -224,7 +213,6 @@ final class Captions {
         return c;
     }
 
-    // ---------- LRC (lyrics): a line stays up until the next one starts ----------
     static Captions parseLrc(String text) {
         Captions c = new Captions();
         ArrayList<long[]> t = new ArrayList<>();
@@ -232,7 +220,7 @@ final class Captions {
         for (String l : text.replace("\r\n", "\n").replace('\r', '\n').split("\n")) {
             ArrayList<Long> ts = new ArrayList<>();
             Matcher m = LRC.matcher(l);
-            while (m.find()) { // several stamps can share one line; the pattern is anchored to the start
+            while (m.find()) {
                 String f = m.group(3) == null ? "0" : m.group(3);
                 long ms = f.length() == 3 ? Long.parseLong(f) : f.length() == 2 ? Long.parseLong(f) * 10 : Long.parseLong(f) * 100;
                 ts.add((Long.parseLong(m.group(1)) * 60 + Long.parseLong(m.group(2))) * 1000 + ms);
@@ -256,7 +244,6 @@ final class Captions {
         return c;
     }
 
-    // ---------- MicroDVD: frame numbers, 23.976 fps unless the first line is {1}{1}fps ----------
     static Captions parseDvd(String text) {
         Captions c = new Captions();
         double fps = 23.976;
@@ -287,7 +274,7 @@ final class Captions {
             i++;
             StringBuilder sb = new StringBuilder();
             while (i < lines.length && !lines[i].trim().isEmpty()) {
-                if (lines[i].contains("-->")) break; // a damaged file without blank line between cues
+                if (lines[i].contains("-->")) break;
                 String t = clean(lines[i]);
                 if (!t.isEmpty()) { if (sb.length() > 0) sb.append('\n'); sb.append(t); }
                 i++;
@@ -302,7 +289,6 @@ final class Captions {
         return c;
     }
 
-    /** Text visible at the given time, or null. */
     String at(long ms) {
         int lo = 0, hi = cues.size() - 1, best = -1;
         while (lo <= hi) {
@@ -311,7 +297,7 @@ final class Captions {
         }
         if (best < 0) return null;
         StringBuilder sb = null;
-        for (int k = best; k >= 0 && k > best - 4; k--) { // a few cues back, in case several overlap
+        for (int k = best; k >= 0 && k > best - 4; k--) {
             Cue q = cues.get(k);
             if (q.e <= ms) continue;
             if (sb == null) sb = new StringBuilder(q.t);

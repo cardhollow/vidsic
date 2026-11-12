@@ -24,9 +24,20 @@ class MediaLoader {
     static List<Media> load(Context c, boolean video) {
         List<Media> out = new ArrayList<>();
         Uri base = video ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI : MediaStore.Audio.Media.EXTERNAL_CONTENT_URI;
-        String[] proj = new String[]{"_id", "title", "duration", "date_added", "relative_path", "_display_name", "artist", "album", "_size"};
-        try (Cursor cu = c.getContentResolver().query(base, proj, null, null, "date_added DESC")) {
-            if (cu == null) return out;
+        String[] basic = new String[]{"_id", "title", "duration", "date_added", "relative_path", "_display_name", "artist", "album", "_size"};
+
+        String[] extra = new String[basic.length + 1];
+        System.arraycopy(basic, 0, extra, 0, basic.length);
+        extra[basic.length] = video ? "description" : "genre";
+        Cursor cu = null;
+        boolean hasExtra = true;
+        try { cu = c.getContentResolver().query(base, extra, null, null, "date_added DESC"); } catch (Exception e) { cu = null; }
+        if (cu == null) {
+            hasExtra = false;
+            try { cu = c.getContentResolver().query(base, basic, null, null, "date_added DESC"); } catch (Exception e) { cu = null; }
+        }
+        if (cu == null) return out;
+        try {
             while (cu.moveToNext()) {
                 Media m = new Media();
                 m.video = video;
@@ -51,13 +62,17 @@ class MediaLoader {
                 m.folderHidden = m.hidden;
                 String ar = cu.getString(6);
                 m.artist = (ar == null || ar.equals("<unknown>")) ? (video ? m.folder : "Unknown artist") : ar;
+                if (hasExtra) {
+                    String x = cu.getString(9);
+                    if (x != null && !x.equals("<unknown>")) { if (video) m.desc = x; else m.genre = x; }
+                }
                 out.add(m);
             }
-        } catch (Exception e) { }
+        } catch (Exception e) {
+        } finally { cu.close(); }
         return out;
     }
 
-    /** Needs All-files access. Finds media inside .nomedia / dot-folders / dot-files that MediaStore skips. */
     static void scanHidden(List<Media> aOut, List<Media> vOut) {
         File root = Environment.getExternalStorageDirectory();
         walk(root, root, false, 0, aOut, vOut);
@@ -104,6 +119,8 @@ class MediaLoader {
                     if (tt != null && !tt.isEmpty()) t = tt;
                     ar = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST);
                     al = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM);
+                    String ge = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_GENRE);
+                    if (ge != null && !isV) m.genre = ge;
                 } catch (Exception e) {
                 } finally { try { r.release(); } catch (Exception e) { } }
                 m.title = t;

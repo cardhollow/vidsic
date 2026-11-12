@@ -10,20 +10,18 @@ import android.content.pm.ServiceInfo;
 import android.graphics.drawable.Icon;
 import android.os.IBinder;
 
-/**
- * Keeps playback alive in the background and shows the system media notification
- * (also what the lock screen and the quick-settings media player use).
- */
 public class PlaybackService extends Service implements Engine.L {
     static final String CH = "vidsic_playback";
     static final String A_PREV = "com.chxd.vidsicplayer.PREV", A_TOGGLE = "com.chxd.vidsicplayer.TOGGLE",
-            A_NEXT = "com.chxd.vidsicplayer.NEXT", A_DISMISS = "com.chxd.vidsicplayer.DISMISS";
+            A_NEXT = "com.chxd.vidsicplayer.NEXT", A_DISMISS = "com.chxd.vidsicplayer.DISMISS",
+            A_FAV = "com.chxd.vidsicplayer.FAV", A_SHUFFLE = "com.chxd.vidsicplayer.SHUFFLE", A_REPEAT = "com.chxd.vidsicplayer.REPEAT";
     static final int ID = 4711;
     static boolean running;
 
     Engine en;
     NotificationManager nm;
     boolean fg;
+    String lastSig;
 
     @Override public IBinder onBind(Intent i) { return null; }
 
@@ -46,6 +44,9 @@ public class PlaybackService extends Service implements Engine.L {
         if (A_PREV.equals(a)) en.prev();
         else if (A_NEXT.equals(a)) en.next(false);
         else if (A_TOGGLE.equals(a)) en.toggle();
+        else if (A_FAV.equals(a)) { Media m = en.cur(); if (m != null) { en.store.toggleFav(m); en.fire(); } }
+        else if (A_SHUFFLE.equals(a)) { en.shuffle = !en.shuffle; en.fire(); }
+        else if (A_REPEAT.equals(a)) { en.repeat = (en.repeat + 1) % 3; en.fire(); }
         else if (A_DISMISS.equals(a) && !en.isPlaying()) { quit(); return START_NOT_STICKY; }
         update(true);
         return START_NOT_STICKY;
@@ -61,6 +62,7 @@ public class PlaybackService extends Service implements Engine.L {
     @Override public void changed() { update(false); }
 
     void quit() {
+        lastSig = null;
         stopForeground(STOP_FOREGROUND_REMOVE);
         fg = false;
         try { nm.cancel(ID); } catch (Exception e) { }
@@ -71,7 +73,7 @@ public class PlaybackService extends Service implements Engine.L {
         try {
             startForeground(ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
             fg = true;
-        } catch (Exception e) { // not allowed from the background right now: still show it
+        } catch (Exception e) {
             try { nm.notify(ID, n); } catch (Exception e2) { }
         }
     }
@@ -79,11 +81,15 @@ public class PlaybackService extends Service implements Engine.L {
     void update(boolean start) {
         Media m = en.cur();
         if (m == null) {
-            if (start && !fg) goForeground(build(null, false)); // a started foreground service must always call startForeground
+            lastSig = null;
+            if (start && !fg) goForeground(build(null, false));
             quit();
             return;
         }
         boolean playing = en.isPlaying();
+        String sig = m.key() + "|" + m.title + "|" + m.artist + "|" + playing + "|" + (en.art != null && m.key().equals(en.artKey)) + "|" + en.shuffle + "|" + en.repeat + "|" + Ic.rev;
+        if (!start && sig.equals(lastSig)) return;
+        lastSig = sig;
         Notification n = build(m, playing);
         if (playing || (start && !fg)) {
             if (!fg) goForeground(n); else nm.notify(ID, n);
@@ -114,13 +120,17 @@ public class PlaybackService extends Service implements Engine.L {
                 .setShowWhen(false)
                 .setOngoing(playing);
         if (m != null && en.art != null && m.key().equals(en.artKey)) b.setLargeIcon(en.art);
-        b.addAction(new Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_prev), "Previous", act(A_PREV, 1)).build());
-        b.addAction(new Notification.Action.Builder(Icon.createWithResource(this, playing ? R.drawable.ic_pause : R.drawable.ic_play),
+        b.addAction(new Notification.Action.Builder(Ic.notif(this, R.drawable.ic_shuffle, en.shuffle),
+                en.shuffle ? "Shuffle on" : "Shuffle off", act(A_SHUFFLE, 4)).build());
+        b.addAction(new Notification.Action.Builder(Ic.notif(this, R.drawable.ic_prev, null), "Previous", act(A_PREV, 1)).build());
+        b.addAction(new Notification.Action.Builder(Ic.notif(this, playing ? R.drawable.ic_pause : R.drawable.ic_play, null),
                 playing ? "Pause" : "Play", act(A_TOGGLE, 2)).build());
-        b.addAction(new Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_next), "Next", act(A_NEXT, 3)).build());
+        b.addAction(new Notification.Action.Builder(Ic.notif(this, R.drawable.ic_next, null), "Next", act(A_NEXT, 3)).build());
+        b.addAction(new Notification.Action.Builder(Ic.notif(this, en.repeat == 2 ? R.drawable.ic_repeat_one : R.drawable.ic_repeat, en.repeat != 0),
+                en.repeat == 0 ? "Loop off" : en.repeat == 1 ? "Loop all" : "Loop one", act(A_REPEAT, 5)).build());
         b.setStyle(new Notification.MediaStyle()
                 .setMediaSession(en.session.getSessionToken())
-                .setShowActionsInCompactView(0, 1, 2));
+                .setShowActionsInCompactView(1, 2, 3));
         return b.build();
     }
 }

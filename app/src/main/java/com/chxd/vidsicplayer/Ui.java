@@ -58,7 +58,6 @@ final class Ui {
 
     static double lum(int c) { return (0.299 * Color.red(c) + 0.587 * Color.green(c) + 0.114 * Color.blue(c)) / 255.0; }
 
-    /** theme: app (default purple/dark) | device (Material You, Android 12+) | custom (base + accent). */
     static void apply(Context c, Store s) {
         String t = s.p.getString("theme", "app");
         boolean night = (c.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
@@ -104,7 +103,6 @@ final class Ui {
         ONACC = lum(acc) > 0.6 ? 0xFF111111 : 0xFFFFFFFF;
     }
 
-    // ---------- native widgets in the theme's accent (they would otherwise use the manifest's violet) ----------
     static void tintSwitch(android.widget.Switch sw) {
         int[][] st = {{android.R.attr.state_checked}, {}};
         sw.setThumbTintList(new ColorStateList(st, new int[]{ACC, LIGHT ? 0xFF8E8E9C : 0xFFC4C4D2}));
@@ -117,7 +115,6 @@ final class Ui {
         sb.setProgressBackgroundTintList(ColorStateList.valueOf(SURF2));
     }
 
-    /** Text cursor, selection handles and highlight of an EditText in the accent color. */
     static void tintEdit(Context c, EditText et) {
         try {
             GradientDrawable cur = new GradientDrawable();
@@ -150,7 +147,7 @@ final class Ui {
 
     static ImageView icon(Context c, int res, int tint, int size) {
         ImageView v = new ImageView(c);
-        v.setImageResource(res);
+        Ic.set(v, res);
         v.setColorFilter(tint);
         v.setLayoutParams(new LinearLayout.LayoutParams(dp(c, size), dp(c, size)));
         return v;
@@ -158,7 +155,7 @@ final class Ui {
 
     static ImageView btn(Context c, int res, int tint, int size, int pad) {
         ImageView v = new ImageView(c);
-        v.setImageResource(res);
+        Ic.set(v, res);
         v.setColorFilter(tint);
         int p = dp(c, pad);
         v.setPadding(p, p, p, p);
@@ -190,7 +187,7 @@ final class Ui {
         f.setBackground(shape(SURF2, 8, c));
         f.setClipToOutline(true);
         ImageView ic = new ImageView(c);
-        ic.setImageResource(m.video ? R.drawable.ic_movie : R.drawable.ic_music);
+        Ic.set(ic, m.video ? R.drawable.ic_movie : R.drawable.ic_music);
         ic.setColorFilter(SUB);
         int p = dp(c, size / 4f);
         ic.setPadding(p, p, p, p);
@@ -202,7 +199,22 @@ final class Ui {
         return f;
     }
 
+    static void dropThumbs(String key) {
+        for (String k : new java.util.ArrayList<>(CACHE.snapshot().keySet())) if (k.startsWith(key + "@")) CACHE.remove(k);
+    }
+
     static Bitmap loadBitmap(Context c, Media m, int px) throws Exception {
+        File cov = Engine.get(c).store.coverFile(m.key());
+        if (cov.isFile()) {
+            android.graphics.BitmapFactory.Options o = new android.graphics.BitmapFactory.Options();
+            o.inSampleSize = 1;
+            o.inJustDecodeBounds = true;
+            android.graphics.BitmapFactory.decodeFile(cov.getPath(), o);
+            while (o.outWidth / (o.inSampleSize * 2) >= px && o.outHeight / (o.inSampleSize * 2) >= px) o.inSampleSize *= 2;
+            o.inJustDecodeBounds = false;
+            Bitmap b = android.graphics.BitmapFactory.decodeFile(cov.getPath(), o);
+            if (b != null) return b;
+        }
         if (m.filePath != null) {
             File f = new File(m.filePath);
             return m.video ? ThumbnailUtils.createVideoThumbnail(f, new Size(px, px), null)
@@ -227,7 +239,64 @@ final class Ui {
         });
     }
 
-    /** Equalizer-style bars: animated while "live", resting bars otherwise. Follows the real audio when "Audio Spectrum Sync" is on. */
+    static final LruCache<String, Bitmap> PCACHE = new LruCache<String, Bitmap>(
+            (int) Math.max(8L * 1024 * 1024, Runtime.getRuntime().maxMemory() / 12)) {
+        @Override protected int sizeOf(String k, Bitmap b) { return b.getByteCount(); }
+    };
+
+    static void photoThumb(final Context c, final Photo p, final ImageView iv, final int px) {
+        final String key = p.key();
+        final String ck = key + "@" + px;
+        iv.setTag(key);
+        Bitmap b = PCACHE.get(ck);
+        if (b != null) { iv.setImageBitmap(b); return; }
+        iv.setImageDrawable(null);
+        if (p.svg) {
+            if (c instanceof MainActivity) ((MainActivity) c).svgThumbs.request(p, px, iv, ck);
+            else iv.setImageBitmap(svgTile(px));
+            return;
+        }
+        EX.execute(() -> {
+            if (!key.equals(iv.getTag())) return;
+            try {
+                final Bitmap bm = c.getContentResolver().loadThumbnail(p.uri, new Size(px, px), null);
+                if (bm == null) return;
+                PCACHE.put(ck, bm);
+                H.post(() -> { if (key.equals(iv.getTag())) iv.setImageBitmap(bm); });
+            } catch (Exception e) { }
+        });
+    }
+
+    static Bitmap svgTile(int px) {
+        Bitmap tile = Bitmap.createBitmap(Math.max(16, px), Math.max(16, px), Bitmap.Config.ARGB_8888);
+        android.graphics.Canvas cv = new android.graphics.Canvas(tile);
+        cv.drawColor(SURF2);
+        Paint pt = new Paint(Paint.ANTI_ALIAS_FLAG);
+        pt.setColor(ACC);
+        pt.setFakeBoldText(true);
+        pt.setTextAlign(Paint.Align.CENTER);
+        pt.setTextSize(tile.getWidth() * 0.28f);
+        cv.drawText("SVG", tile.getWidth() / 2f, tile.getHeight() / 2f + pt.getTextSize() * 0.35f, pt);
+        return tile;
+    }
+
+    static FrameLayout photoBox(Context c, Photo p, int size) {
+        FrameLayout f = new FrameLayout(c);
+        f.setBackground(shape(SURF2, 8, c));
+        f.setClipToOutline(true);
+        ImageView ic = new ImageView(c);
+        Ic.set(ic, R.drawable.ic_image);
+        ic.setColorFilter(SUB);
+        int pd = dp(c, size / 4f);
+        ic.setPadding(pd, pd, pd, pd);
+        f.addView(ic, new FrameLayout.LayoutParams(MATCH, MATCH));
+        ImageView t = new ImageView(c);
+        t.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        f.addView(t, new FrameLayout.LayoutParams(MATCH, MATCH));
+        if (p != null) photoThumb(c, p, t, dp(c, size));
+        return f;
+    }
+
     static class Eq extends View {
         final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
         final boolean live;
@@ -240,7 +309,7 @@ final class Ui {
             this.live = live;
             Engine en = Engine.get(c);
             sp = en.spec;
-            sync = en.store.bool("spec_sync", false);
+            sync = en.store.bool("spec_sync", false) && !Engine.SAVER;
         }
 
         @Override
@@ -258,11 +327,10 @@ final class Ui {
                 float bh = h * f, x = i * 2 * bw;
                 cv.drawRoundRect(x, h - bh, x + bw, h, bw / 2, bw / 2, p);
             }
-            if (live) postInvalidateOnAnimation();
+            if (live) frame(this);
         }
     }
 
-    /** Big mirrored spectrum for the full-screen player ("Audio Player Spectrum"). Real FFT if possible, simulated otherwise. */
     static class SpectrumView extends View {
         static final int N = Spectrum.BANDS;
         final Engine en;
@@ -320,11 +388,10 @@ final class Ui {
                     cv.drawCircle(x + bw / 2f, mid + ph, bw * 0.28f, cap);
                 }
             }
-            if (playing || moving) postInvalidateOnAnimation();
+            if (playing || moving) frame(this);
         }
     }
 
-    /** Filled / empty selection circle with a tick. */
     static View check(Context c, boolean on) {
         FrameLayout f = new FrameLayout(c);
         GradientDrawable g = new GradientDrawable();
@@ -333,7 +400,7 @@ final class Ui {
         f.setBackground(g);
         if (on) {
             ImageView i = new ImageView(c);
-            i.setImageResource(R.drawable.ic_check);
+            Ic.set(i, R.drawable.ic_check);
             i.setColorFilter(ONACC);
             int p = dp(c, 3);
             i.setPadding(p, p, p, p);
@@ -343,7 +410,6 @@ final class Ui {
         return f;
     }
 
-    /** Radio button. */
     static class Radio extends FrameLayout {
         final View dot;
         final GradientDrawable ring = new GradientDrawable();
@@ -366,7 +432,6 @@ final class Ui {
         }
     }
 
-    /** Bottom-sheet modal. */
     static class Sheet {
         final Dialog d;
         final LinearLayout box;
@@ -421,7 +486,6 @@ final class Ui {
         }
     }
 
-    // ---------- centered modals (replace the native Android alert dialogs) ----------
     private static Dialog modal(Context c, LinearLayout box) {
         final Dialog d = new Dialog(c);
         d.requestWindowFeature(Window.FEATURE_NO_TITLE);
@@ -473,7 +537,10 @@ final class Ui {
         return b;
     }
 
-    /** Yes / No style confirmation. danger = red confirm button (delete, clear...). */
+    static void frame(View v) {
+        if (Engine.SAVER) v.postInvalidateDelayed(66); else v.postInvalidateOnAnimation();
+    }
+
     static void confirm(Context c, String title, String msg, String ok, boolean danger, final Runnable onOk) {
         confirm(c, title, msg, ok, danger, onOk, null);
     }
@@ -493,7 +560,26 @@ final class Ui {
         showModal(c, d, false);
     }
 
-    /** One text field (playlist name, rename...). */
+    static void choose(Context c, String title, String msg, String labelA, boolean dangerA, final Runnable onA,
+                       String labelB, boolean dangerB, final Runnable onB) {
+        LinearLayout box = new LinearLayout(c);
+        final Dialog d = modal(c, box);
+        modalHead(c, box, title, msg);
+        LinearLayout b = modalButtons(c, box);
+        TextView no = modalButton(c, "Cancel", ACC, 0);
+        no.setOnClickListener(v -> d.cancel());
+        TextView a = modalButton(c, labelA, dangerA ? 0xFFFFFFFF : ONACC, dangerA ? RED : ACC);
+        a.setOnClickListener(v -> { d.dismiss(); if (onA != null) onA.run(); });
+        TextView bb = modalButton(c, labelB, dangerB ? 0xFFFFFFFF : ONACC, dangerB ? RED : ACC);
+        bb.setOnClickListener(v -> { d.dismiss(); if (onB != null) onB.run(); });
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(WRAP, WRAP);
+        lp.setMargins(dp(c, 6), 0, 0, 0);
+        b.addView(no);
+        b.addView(a, lp);
+        b.addView(bb, lp);
+        showModal(c, d, false);
+    }
+
     static void prompt(Context c, String title, String initial, String hint, String ok, final Consumer<String> done) {
         LinearLayout box = new LinearLayout(c);
         final Dialog d = modal(c, box);
@@ -532,11 +618,44 @@ final class Ui {
         et.requestFocus();
     }
 
-    /** Just a message with one button. */
-    static void notice(Context c, String title, String msg) {
+    static void notice(Context c, String title, String msg) { notice(c, title, msg, null); }
+
+    static void notice(Context c, String title, String msg, Runnable afterDismiss) {
         LinearLayout box = new LinearLayout(c);
         final Dialog d = modal(c, box);
         modalHead(c, box, title, msg);
+        LinearLayout b = modalButtons(c, box);
+        TextView ok = modalButton(c, "OK", ONACC, ACC);
+        ok.setOnClickListener(v -> { d.dismiss(); if (afterDismiss != null) afterDismiss.run(); });
+        b.addView(ok);
+        showModal(c, d, false);
+    }
+
+    static void details(Context c, String title, String[][] rows) {
+        LinearLayout box = new LinearLayout(c);
+        final Dialog d = modal(c, box);
+        modalHead(c, box, title, null);
+        LinearLayout list = new LinearLayout(c);
+        list.setOrientation(LinearLayout.VERTICAL);
+        list.setPadding(dp(c, 24), 0, dp(c, 24), dp(c, 4));
+        for (String[] r : rows) {
+            if (r[1] == null || r[1].trim().isEmpty()) continue;
+            TextView k = text(c, r[0], 12, SUB, false);
+            k.setPadding(0, dp(c, 8), 0, 0);
+            list.addView(k);
+            TextView v = text(c, r[1], 15, TXT, false);
+            v.setSingleLine(false);
+            v.setEllipsize(null);
+            v.setTextIsSelectable(true);
+            list.addView(v);
+        }
+        ScrollView sv = new ScrollView(c);
+        sv.addView(list);
+        int maxH = c.getResources().getDisplayMetrics().heightPixels * 6 / 10;
+        box.addView(sv, new LinearLayout.LayoutParams(MATCH, WRAP));
+        sv.getViewTreeObserver().addOnGlobalLayoutListener(() -> {
+            if (sv.getHeight() > maxH) { ViewGroup.LayoutParams lp = sv.getLayoutParams(); lp.height = maxH; sv.setLayoutParams(lp); }
+        });
         LinearLayout b = modalButtons(c, box);
         TextView ok = modalButton(c, "OK", ONACC, ACC);
         ok.setOnClickListener(v -> d.dismiss());

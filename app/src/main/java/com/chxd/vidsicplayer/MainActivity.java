@@ -9,7 +9,6 @@ import android.os.SystemClock;
 import android.provider.OpenableColumns;
 import java.io.InputStream;
 import java.io.OutputStream;
-import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.net.Uri;
@@ -30,7 +29,6 @@ import android.widget.BaseAdapter;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.ListView;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.Switch;
@@ -48,6 +46,18 @@ public class MainActivity extends Activity implements Engine.L {
     Engine engine;
     FrameLayout root, content;
     MediaPage audioPage, videoPage;
+    PhotoPage photoPage;
+    PhotoViewer viewer;
+    PhotoOps pops;
+    MetaEditor meta;
+    SvgThumbs svgThumbs;
+    PhotoEditor editor;
+    CollageMaker collage;
+    GifMaker gif;
+    List<Photo> photos = new ArrayList<>();
+    final Map<String, Photo> photoByKey = new HashMap<>();
+    static final int P_AUDIO = 0, P_VIDEO = 1, P_PHOTO = 2, P_SET = 3;
+    int[] navPages = {P_AUDIO, P_VIDEO, P_SET};
     ScrollView settings;
     PlayerView player;
     LinearLayout nav, mini;
@@ -56,8 +66,8 @@ public class MainActivity extends Activity implements Engine.L {
     FrameLayout miniThumb;
     String miniKey = "";
     ProgressBar miniProg;
-    final ImageView[] navIcons = new ImageView[3];
-    final TextView[] navLabels = new TextView[3];
+    ImageView[] navIcons;
+    TextView[] navLabels;
     List<Media> audios = new ArrayList<>(), videos = new ArrayList<>();
     final Map<String, Media> byKey = new HashMap<>();
     int page = 0;
@@ -65,14 +75,15 @@ public class MainActivity extends Activity implements Engine.L {
     Runnable pendingDelAfter;
     Media pendingRen;
     String pendingRenName;
-    FrameLayout queueLayer;       // play queue overlay (null when closed)
+    FrameLayout queueLayer;
     BaseAdapter queueAd;
     TextView queueHead, queueHint;
     QueueList queueList;
     LinearLayout queueSelBar;
-    boolean qSelMode;                                         // "Select Item": tick queue rows, then act on them
+    boolean qSelMode;
     final java.util.HashSet<Integer> qSel = new java.util.HashSet<>();
     String pendingSpecKey;
+    boolean rescanPending;
     Media pendingCapMedia;
     boolean loading, reloadQueued;
     long lastLoad;
@@ -83,7 +94,7 @@ public class MainActivity extends Activity implements Engine.L {
         public void run() {
             updateMini();
             if (player.getVisibility() == View.VISIBLE) player.tick();
-            h.postDelayed(this, 500);
+            h.postDelayed(this, Engine.SAVER ? 1000 : 500);
         }
     };
 
@@ -96,13 +107,27 @@ public class MainActivity extends Activity implements Engine.L {
         engine = Engine.get(this);
         store = engine.store;
         engine.listen(this);
+        pops = new PhotoOps(this);
+        meta = new MetaEditor(this);
+        TagWriter.Recovery recovery = TagWriter.recoverInterruptedWrites(this);
+        if (recovery.restored > 0) toast("Recovered " + recovery.restored + " interrupted metadata edit(s); original file data was restored.");
+        if (recovery.timestampNotRestored > 0) toast("Recovered original metadata, but could not preserve the original Last Modified timestamp for " + recovery.timestampNotRestored + " file(s).");
+        if (recovery.pending > 0) toast("Could not yet recover " + recovery.pending + " interrupted metadata edit(s). Keep the affected files in place and reopen Vidsic after restoring file access.");
+        svgThumbs = new SvgThumbs(this);
+        engine.onRateRefused = f -> toast("This device can't play at " + PlayerView.fmtSpeed(f));
         buildUi();
         loadMedia();
-        if (needsPermissions()) requestPermissions(perms(), 1);
-        // "Auto rescan library": pick up files that are added / removed / renamed while the app is open
+        if (needsPermissions()) {
+            store.setBool("perm_asked", true);
+            store.setBool("notif_asked", true);
+            requestPermissions(perms(), 1);
+        }
+
         mediaObs = new ContentObserver(h) {
             @Override public void onChange(boolean self) {
                 if (!store.bool("auto_rescan", false)) return;
+
+                if (Engine.SAVER || !engine.spec.uiVisible) { rescanPending = true; return; }
                 h.removeCallbacks(autoRescan);
                 h.postDelayed(autoRescan, 2000);
             }
@@ -110,7 +135,136 @@ public class MainActivity extends Activity implements Engine.L {
         try {
             getContentResolver().registerContentObserver(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, true, mediaObs);
             getContentResolver().registerContentObserver(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, true, mediaObs);
+            getContentResolver().registerContentObserver(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, true, mediaObs);
         } catch (Exception e) { }
+        if (b == null) handleIntent(getIntent());
+    }
+
+    @Override protected void onNewIntent(Intent in) {
+        super.onNewIntent(in);
+        setIntent(in);
+        handleIntent(in);
+    }
+
+    @SuppressWarnings("deprecation")
+    static final String ACT_GROUP = "com.chxd.vidsicplayer.OPEN_GROUP";
+    static final String ACT_PLAYER = "com.chxd.vidsicplayer.OPEN_PLAYER";
+    Runnable pendingOpen;
+    boolean loadedOnce;
+
+    void openGroup(final Group g, final String item, final boolean play, final boolean exitAfter) {
+        if (g == null) return;
+        Runnable r = () -> {
+            if (g.photo()) {
+                if (photoPage == null) { toast("Turn on Image Viewer in Settings to open pictures"); return; }
+                showPage(P_PHOTO);
+                photoPage.openGroup(g);
+                if (item != null) {
+                    List<Photo> l = photoPage.shown.isEmpty() ? new ArrayList<Photo>() : new ArrayList<>(photoPage.shown);
+                    for (int i = 0; i < l.size(); i++) if (l.get(i).key().equals(item)) { openViewer(l, i, false, -1); break; }
+                }
+            } else {
+                showPage(g.video ? P_VIDEO : P_AUDIO);
+                MediaPage mp = g.video ? videoPage : audioPage;
+                mp.openGroup(g);
+                if (item != null && play) {
+                    List<Media> l = new ArrayList<>(mp.shown);
+                    for (int i = 0; i < l.size(); i++) if (l.get(i).key().equals(item)) { playMedia(l, i); break; }
+                    if (exitAfter) h.postDelayed(this::finish, 700);
+                }
+            }
+        };
+        if (loadedOnce) r.run(); else pendingOpen = r;
+    }
+
+    void handleIntent(Intent in) {
+        if (in == null || in.getAction() == null) return;
+        String act = in.getAction();
+        if (ACT_PLAYER.equals(act)) {
+            setIntent(new Intent(Intent.ACTION_MAIN));
+            if (engine.cur() != null) {
+                if (queueLayer != null) hideQueue();
+                openPlayer();
+            }
+            return;
+        }
+        if (ACT_GROUP.equals(act)) {
+            Group g = Group.parse(in.getStringExtra("group"));
+            String item = in.getStringExtra("item");
+            setIntent(new Intent(Intent.ACTION_MAIN));
+            openGroup(g, item, in.getBooleanExtra("play", false), in.getBooleanExtra("exit", false));
+            return;
+        }
+        List<Uri> uris = new ArrayList<>();
+        try {
+            if (Intent.ACTION_VIEW.equals(act) && in.getData() != null) uris.add(in.getData());
+            else if (Intent.ACTION_SEND.equals(act)) {
+                Uri u = in.getParcelableExtra(Intent.EXTRA_STREAM);
+                if (u != null) uris.add(u);
+            } else if (Intent.ACTION_SEND_MULTIPLE.equals(act)) {
+                ArrayList<Uri> l = in.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+                if (l != null) uris.addAll(l);
+            }
+        } catch (Exception e) { }
+        setIntent(new Intent(Intent.ACTION_MAIN));
+        if (uris.isEmpty()) return;
+        List<Media> ms = new ArrayList<>();
+        List<Photo> ps = new ArrayList<>();
+        for (Uri u : uris) {
+            String name = null;
+            long size = 0;
+            try (Cursor cu = getContentResolver().query(u, new String[]{OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE}, null, null, null)) {
+                if (cu != null && cu.moveToFirst()) { name = cu.getString(0); size = cu.isNull(1) ? 0 : cu.getLong(1); }
+            } catch (Exception e) { }
+            if (name == null || name.isEmpty()) name = u.getLastPathSegment() == null ? "File" : u.getLastPathSegment();
+            String type = null;
+            try { type = getContentResolver().getType(u); } catch (Exception e) { }
+            if (type == null || type.equals("application/octet-stream")) {
+                String x = ext(name);
+                if (!x.isEmpty()) type = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(x.substring(1).toLowerCase(java.util.Locale.US));
+            }
+            if (type == null) type = in.getType();
+            if (type == null) continue;
+            long id = -(Math.abs((long) u.toString().hashCode()) + 1);
+            int dot = name.lastIndexOf('.');
+            String title = dot > 0 ? name.substring(0, dot) : name;
+            if (type.startsWith("audio/") || type.startsWith("video/") || type.equals("application/ogg")) {
+                Media m = new Media();
+                m.id = id;
+                m.uri = u;
+                m.name = name;
+                m.title = title;
+                m.video = type.startsWith("video/");
+                m.artist = m.video ? "Opened files" : "Unknown artist";
+                m.album = "Unknown album";
+                m.folder = "Opened files";
+                m.path = "Opened files/";
+                m.added = System.currentTimeMillis() / 1000;
+                m.size = size;
+                store.applyMeta(m);
+                ms.add(m);
+            } else if (type.startsWith("image/")) {
+                Photo p = new Photo();
+                p.id = id;
+                p.uri = u;
+                p.name = name;
+                p.title = title;
+                p.folder = "Opened files";
+                p.path = "Opened files/";
+                p.added = System.currentTimeMillis() / 1000;
+                p.size = size;
+                p.svg = PhotoLoader.isSvg(name, type);
+                p.gif = PhotoLoader.isGif(name, type);
+                ps.add(p);
+            }
+        }
+        if (!ms.isEmpty()) {
+            for (Media m : ms) byKey.put(m.key(), m);
+            playMedia(ms, 0);
+        } else if (!ps.isEmpty()) {
+            for (Photo p : ps) photoByKey.put(p.key(), p);
+            openViewer(ps, 0, false, 0);
+        } else toast("This file can't be opened");
     }
 
     void buildUi() {
@@ -133,9 +287,12 @@ public class MainActivity extends Activity implements Engine.L {
         main.addView(content, new LinearLayout.LayoutParams(Ui.MATCH, 0, 1));
         audioPage = new MediaPage(this, false);
         videoPage = new MediaPage(this, true);
+        photoPage = store.bool("img_on", false) ? new PhotoPage(this) : null;
+        if (photoPage == null && page == P_PHOTO) page = P_AUDIO;
         settings = buildSettings();
         content.addView(audioPage.root, new FrameLayout.LayoutParams(Ui.MATCH, Ui.MATCH));
         content.addView(videoPage.root, new FrameLayout.LayoutParams(Ui.MATCH, Ui.MATCH));
+        if (photoPage != null) content.addView(photoPage.root, new FrameLayout.LayoutParams(Ui.MATCH, Ui.MATCH));
         content.addView(settings, new FrameLayout.LayoutParams(Ui.MATCH, Ui.MATCH));
 
         buildMini();
@@ -146,6 +303,16 @@ public class MainActivity extends Activity implements Engine.L {
         player = new PlayerView(this);
         player.setVisibility(View.GONE);
         root.addView(player, new FrameLayout.LayoutParams(Ui.MATCH, Ui.MATCH));
+        viewer = null;
+        viewer = new PhotoViewer(this);
+        viewer.setVisibility(View.GONE);
+        root.addView(viewer, new FrameLayout.LayoutParams(Ui.MATCH, Ui.MATCH));
+        editor = new PhotoEditor(this);
+        root.addView(editor, new FrameLayout.LayoutParams(Ui.MATCH, Ui.MATCH));
+        collage = new CollageMaker(this);
+        root.addView(collage, new FrameLayout.LayoutParams(Ui.MATCH, Ui.MATCH));
+        gif = new GifMaker(this);
+        root.addView(gif, new FrameLayout.LayoutParams(Ui.MATCH, Ui.MATCH));
         setContentView(root);
         showPage(page);
         updateMini();
@@ -159,33 +326,50 @@ public class MainActivity extends Activity implements Engine.L {
 
     @Override protected void onResume() {
         super.onResume();
+        h.removeCallbacks(ticker);
         h.post(ticker);
+        engine.refreshSaver();
         engine.spec.setUiVisible(true);
-        if (player != null) player.updateKeepOn();
+        h.postDelayed(this::checkSpecPermission, 700);
+        if (player != null) { player.updateKeepOn(); player.startCapLoop(); }
         if (loading) { if (stats != null) refreshStats(); }
-        else if (store.bool("auto_rescan", false) && SystemClock.uptimeMillis() - lastLoad > 30000) loadMedia();
+        else if (store.bool("auto_rescan", false) && !Engine.SAVER && (rescanPending || SystemClock.uptimeMillis() - lastLoad > 30000)) { rescanPending = false; loadMedia(); }
         else if (wantHidden() && !scanned && Environment.isExternalStorageManager()) loadMedia();
         else if (stats != null) refreshStats();
     }
-    @Override protected void onPause() {
-        super.onPause();
+    @Override protected void onStart() {
+        super.onStart();
+        engine.spec.setUiVisible(true);
+        h.removeCallbacks(ticker);
+        h.post(ticker);
+    }
+
+    @Override protected void onStop() {
+        super.onStop();
+        if (isInPictureInPictureMode()) return;
         h.removeCallbacks(ticker);
         engine.spec.setUiVisible(false);
+        Widgets.dataChanged(this);
+    }
+
+    @Override protected void onPause() {
+        super.onPause();
         engine.saveNow();
-        if (player != null) player.exitSleep(); // leaving the app (or the system sleeping the screen) ends the sleep screen
+        if (viewer != null) viewer.pauseForBackground();
+        if (player != null) player.exitSleep();
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        // playback keeps going (it lives in the engine + notification service); just detach this screen
+
         engine.ls.remove(this);
+        engine.onRateRefused = null;
         if (player != null) engine.ls.remove(player);
         h.removeCallbacks(autoRescan);
         try { getContentResolver().unregisterContentObserver(mediaObs); } catch (Exception e) { }
     }
 
-    // ---------- permissions & loading ----------
     boolean can(String p) { return checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED; }
     boolean audioOk() {
         return can("android.permission.READ_EXTERNAL_STORAGE")
@@ -195,26 +379,63 @@ public class MainActivity extends Activity implements Engine.L {
         return can("android.permission.READ_EXTERNAL_STORAGE")
                 || (Build.VERSION.SDK_INT >= 33 && can("android.permission.READ_MEDIA_VIDEO"));
     }
+    boolean imageOk() {
+        return can("android.permission.READ_EXTERNAL_STORAGE")
+                || (Build.VERSION.SDK_INT >= 33 && can("android.permission.READ_MEDIA_IMAGES"));
+    }
     boolean notifOk() { return Build.VERSION.SDK_INT < 33 || can("android.permission.POST_NOTIFICATIONS"); }
-    boolean needsPermissions() { return !(audioOk() && videoOk() && notifOk()); }
+    boolean needsPermissions() {
+
+        return !(audioOk() && videoOk()) || (store.bool("img_on", false) && !imageOk())
+                || (!notifOk() && !store.bool("notif_asked", false));
+    }
+
+    boolean allAccessOk() { return audioOk() && videoOk() && notifOk() && (!store.bool("img_on", false) || imageOk()); }
+
+    void openAppSettings() {
+        try {
+            startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName())));
+        } catch (Exception e) { }
+    }
+
+    void grantAccess() {
+        if (allAccessOk()) { toast("Access is already allowed"); return; }
+        boolean canAsk = !store.bool("perm_asked", false);
+        if (!canAsk) for (String p : perms()) if (!can(p) && shouldShowRequestPermissionRationale(p)) { canAsk = true; break; }
+        if (canAsk) {
+            store.setBool("perm_asked", true);
+            store.setBool("notif_asked", true);
+            requestPermissions(perms(), 1);
+        } else {
+            toast("Allow Storage / Media and Notifications in the settings");
+            openAppSettings();
+        }
+    }
 
     String[] perms() {
-        return Build.VERSION.SDK_INT >= 33
-                ? new String[]{"android.permission.READ_EXTERNAL_STORAGE", "android.permission.READ_MEDIA_AUDIO",
-                "android.permission.READ_MEDIA_VIDEO", "android.permission.POST_NOTIFICATIONS"}
-                : new String[]{"android.permission.READ_EXTERNAL_STORAGE"};
+        if (Build.VERSION.SDK_INT < 33) return new String[]{"android.permission.READ_EXTERNAL_STORAGE"};
+        boolean img = store.bool("img_on", false);
+        return img ? new String[]{"android.permission.READ_EXTERNAL_STORAGE", "android.permission.READ_MEDIA_AUDIO",
+                "android.permission.READ_MEDIA_VIDEO", "android.permission.READ_MEDIA_IMAGES", "android.permission.POST_NOTIFICATIONS"}
+                : new String[]{"android.permission.READ_EXTERNAL_STORAGE", "android.permission.READ_MEDIA_AUDIO",
+                "android.permission.READ_MEDIA_VIDEO", "android.permission.POST_NOTIFICATIONS"};
     }
 
     @Override
     public void onRequestPermissionsResult(int code, String[] p, int[] r) {
-        if (code == 2) { // microphone permission, needed by Android to read the audio spectrum
+        if (code == 2) {
             boolean ok = r.length > 0 && r[0] == PackageManager.PERMISSION_GRANTED;
-            if (ok) engine.fire();
-            else {
+            if (ok) {
+                engine.spec.retry();
+                engine.spec.update();
+                engine.fire();
+                rebuildUi();
+            } else {
                 if (pendingSpecKey != null) store.setBool(pendingSpecKey, false);
                 rebuildUi();
-                Ui.notice(this, "Permission needed", "Android only lets an app read the audio spectrum with the Microphone permission. "
-                        + "Nothing is recorded. You can allow it in the app settings and turn this on again.");
+                if (!shouldShowRequestPermissionRationale("android.permission.RECORD_AUDIO")) micBlocked();
+                else Ui.notice(this, "Permission needed", "Android only lets an app read the audio spectrum with the Microphone permission. "
+                        + "Nothing is recorded. You can turn this on again and allow it.");
             }
             pendingSpecKey = null;
             return;
@@ -229,7 +450,7 @@ public class MainActivity extends Activity implements Engine.L {
         loading = true;
         lastLoad = SystemClock.uptimeMillis();
         new Thread(() -> {
-            // library scanning must never compete with the audio decoder
+
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
             try { loadNow(); } catch (Throwable t) { h.post(() -> loading = false); }
         }).start();
@@ -237,13 +458,14 @@ public class MainActivity extends Activity implements Engine.L {
 
     void loadNow() {
         final List<Media> la = MediaLoader.load(this, false), lv = MediaLoader.load(this, true);
+        final List<Photo> lp = store.bool("img_on", false) && imageOk() ? PhotoLoader.load(this) : new ArrayList<Photo>();
         boolean sc = false;
         if (wantHidden() && Environment.isExternalStorageManager()) {
             try { MediaLoader.scanHidden(la, lv); sc = true; } catch (Exception e) { }
         }
         final boolean did = sc;
-        for (Media m : la) { String t = store.renamed(m); if (t != null) m.title = t; }
-        for (Media m : lv) { String t = store.renamed(m); if (t != null) m.title = t; }
+        for (Media m : la) store.applyMeta(m);
+        for (Media m : lv) store.applyMeta(m);
         java.util.Comparator<Media> cmp = (x, y) -> Long.compare(y.added, x.added);
         Collections.sort(la, cmp);
         Collections.sort(lv, cmp);
@@ -254,8 +476,15 @@ public class MainActivity extends Activity implements Engine.L {
             byKey.clear();
             for (Media m : la) byKey.put(m.key(), m);
             for (Media m : lv) byKey.put(m.key(), m);
+            photos = lp;
+            photoByKey.clear();
+            for (Photo ph : lp) photoByKey.put(ph.key(), ph);
             loading = false;
             refreshAll();
+            refreshPhotos();
+            loadedOnce = true;
+            if (pendingOpen != null) { Runnable po = pendingOpen; pendingOpen = null; po.run(); }
+            Group.invalidate();
             if (reloadQueued) { reloadQueued = false; loadMedia(); }
         });
     }
@@ -280,56 +509,84 @@ public class MainActivity extends Activity implements Engine.L {
         if (stats != null) refreshStats();
     }
 
+    void refreshPhotos() {
+        if (photoPage != null) photoPage.refresh();
+        if (viewer != null && viewer.getVisibility() == View.VISIBLE) viewer.updateChrome();
+    }
+
+    void openViewer(List<Photo> list, int idx, boolean slideshow, int shuffle) {
+        if (viewer == null || list.isEmpty()) return;
+        viewer.open(list, idx, slideshow, shuffle);
+    }
+
+    void openEditor(Photo p) { editor.open(p); }
+
+    void openCollage(List<Photo> ps) { collage.open(ps); }
+
+    void openGif(List<Photo> ps) { gif.open(ps); }
+
+    void onViewerClosed() {
+        if (photoPage != null) photoPage.refresh();
+        if (player != null) player.updateKeepOn();
+    }
+
     void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
 
-    // ---------- navigation ----------
     void buildNav() {
         nav = new LinearLayout(this);
         nav.setBackgroundColor(Ui.SURF);
-        int[] ic = {R.drawable.ic_music, R.drawable.ic_movie, R.drawable.ic_settings};
-        String[] lb = {"Audio", "Video", "Settings"};
-        for (int i = 0; i < 3; i++) {
-            final int k = i;
+        navPages = photoPage != null ? new int[]{P_AUDIO, P_VIDEO, P_PHOTO, P_SET} : new int[]{P_AUDIO, P_VIDEO, P_SET};
+        int[] allIc = {R.drawable.ic_music, R.drawable.ic_movie, R.drawable.ic_image, R.drawable.ic_settings};
+        String[] allLb = {"Audio", "Video", "Photos", "Settings"};
+        navIcons = new ImageView[navPages.length];
+        navLabels = new TextView[navPages.length];
+        for (int i = 0; i < navPages.length; i++) {
+            final int id = navPages[i];
             LinearLayout it = new LinearLayout(this);
             it.setOrientation(LinearLayout.VERTICAL);
             it.setGravity(Gravity.CENTER);
             it.setBackground(Ui.rip(0, 0, this));
-            navIcons[i] = Ui.icon(this, ic[i], Ui.SUB, 24);
-            navLabels[i] = Ui.text(this, lb[i], 11, Ui.SUB, true);
+            navIcons[i] = Ui.icon(this, allIc[id], Ui.SUB, 24);
+            navLabels[i] = Ui.text(this, allLb[id], 11, Ui.SUB, true);
             navLabels[i].setGravity(Gravity.CENTER);
             it.addView(navIcons[i]);
             it.addView(navLabels[i], new LinearLayout.LayoutParams(Ui.WRAP, Ui.WRAP));
-            it.setOnClickListener(v -> showPage(k));
+            it.setOnClickListener(v -> showPage(id));
             nav.addView(it, new LinearLayout.LayoutParams(0, Ui.MATCH, 1));
         }
     }
 
-    void showPage(int i) {
-        page = i;
-        audioPage.root.setVisibility(i == 0 ? View.VISIBLE : View.GONE);
-        videoPage.root.setVisibility(i == 1 ? View.VISIBLE : View.GONE);
-        settings.setVisibility(i == 2 ? View.VISIBLE : View.GONE);
-        for (int k = 0; k < 3; k++) {
-            navIcons[k].setColorFilter(k == i ? Ui.ACC : Ui.SUB);
-            navLabels[k].setTextColor(k == i ? Ui.ACC : Ui.SUB);
+    void showPage(int id) {
+        page = id;
+        audioPage.root.setVisibility(id == P_AUDIO ? View.VISIBLE : View.GONE);
+        videoPage.root.setVisibility(id == P_VIDEO ? View.VISIBLE : View.GONE);
+        if (photoPage != null) photoPage.root.setVisibility(id == P_PHOTO ? View.VISIBLE : View.GONE);
+        settings.setVisibility(id == P_SET ? View.VISIBLE : View.GONE);
+        for (int k = 0; k < navPages.length; k++) {
+            navIcons[k].setColorFilter(navPages[k] == id ? Ui.ACC : Ui.SUB);
+            navLabels[k].setTextColor(navPages[k] == id ? Ui.ACC : Ui.SUB);
         }
     }
 
     @Override
     public void onBackPressed() {
+        if (gif != null && gif.showing()) { gif.onBack(); return; }
+        if (collage != null && collage.showing()) { collage.onBack(); return; }
+        if (editor != null && editor.showing()) { editor.onBack(); return; }
+        if (viewer != null && viewer.getVisibility() == View.VISIBLE) { viewer.onBack(); return; }
         if (queueLayer != null) { hideQueue(); return; }
         if (player.getVisibility() == View.VISIBLE) {
-            if (player.onBack()) return; // locked
+            if (player.onBack()) return;
             closePlayer();
             return;
         }
-        if (page == 0 && audioPage.onBack()) return;
-        if (page == 1 && videoPage.onBack()) return;
-        if (page == 2) { showPage(0); return; }
+        if (page == P_AUDIO && audioPage.onBack()) return;
+        if (page == P_VIDEO && videoPage.onBack()) return;
+        if (page == P_PHOTO && photoPage != null && photoPage.onBack()) return;
+        if (page == P_PHOTO || page == P_SET) { showPage(P_AUDIO); return; }
         super.onBackPressed();
     }
 
-    // ---------- mini player: [Thumbnail][Title/Author][prev][play/pause][next][Queue + durations] ----------
     void buildMini() {
         mini = new LinearLayout(this);
         mini.setOrientation(LinearLayout.VERTICAL);
@@ -398,7 +655,7 @@ public class MainActivity extends Activity implements Engine.L {
         miniTitle.setText(m.title);
         miniSub.setText(m.artist);
         miniTime.setText(Ui.fmt(engine.pos()) + " / " + Ui.fmt(engine.dur()));
-        miniPlay.setImageResource(engine.isPlaying() ? R.drawable.ic_pause : R.drawable.ic_play);
+        Ic.set(miniPlay, engine.isPlaying() ? R.drawable.ic_pause : R.drawable.ic_play);
         miniProg.setMax(Math.max(1, engine.dur()));
         miniProg.setProgress(engine.pos());
     }
@@ -429,11 +686,10 @@ public class MainActivity extends Activity implements Engine.L {
         openPlayer();
     }
 
-    // ---------- picture in picture ----------
     void enterPip() {
         try {
             Media m = engine.cur();
-            float ar = 1f; // audio / visualizer: a square window
+            float ar = 1f;
             if (m != null && m.video && !engine.audioMode && engine.vw > 0 && engine.vh > 0) ar = (float) engine.vw / engine.vh;
             ar = Math.max(0.45f, Math.min(2.3f, ar));
             android.app.PictureInPictureParams.Builder b = new android.app.PictureInPictureParams.Builder()
@@ -447,13 +703,16 @@ public class MainActivity extends Activity implements Engine.L {
     @Override
     public void onPictureInPictureModeChanged(boolean isInPip, android.content.res.Configuration cfg) {
         super.onPictureInPictureModeChanged(isInPip, cfg);
+        if (isInPip) {
+            engine.spec.setUiVisible(true);
+            h.removeCallbacks(ticker);
+            h.post(ticker);
+            if (player != null) player.startCapLoop();
+        }
         if (player != null) player.setPip(isInPip);
         if (isInPip) hideQueue();
     }
 
-    // ---------- play queue (overlay above the bottom bars) ----------
-    // Row: [3-bar drag handle][thumbnail][title / author][duration].
-    // Hold the handle and drag to re-arrange. Tap a row for: play, remove from queue, add to playlist, favorite.
     void hideQueue() {
         if (queueLayer != null && queueLayer.getParent() != null) root.removeView(queueLayer);
         queueLayer = null;
@@ -473,7 +732,7 @@ public class MainActivity extends Activity implements Engine.L {
     void showQueue() {
         hideQueue();
         final FrameLayout layer = new FrameLayout(this);
-        layer.setOnClickListener(v -> hideQueue()); // tap outside closes it
+        layer.setOnClickListener(v -> hideQueue());
         queueLayer = layer;
 
         LinearLayout box = new LinearLayout(this);
@@ -537,13 +796,13 @@ public class MainActivity extends Activity implements Engine.L {
                 col.addView(Ui.text(c, m.artist, 12, Ui.SUB, false));
                 r.addView(col, new LinearLayout.LayoutParams(0, Ui.WRAP, 1));
                 if (now) {
-                    // audio spectrum of the playing item, right before its duration
+
                     LinearLayout.LayoutParams ep = new LinearLayout.LayoutParams(Ui.dp(c, 18), Ui.dp(c, 16));
                     ep.setMargins(0, 0, Ui.dp(c, 10), 0);
                     r.addView(new Ui.Eq(c, Ui.ACC, engine.isPlaying()), ep);
                 }
                 r.addView(Ui.text(c, Ui.fmt(m.duration), 12, Ui.SUB, false));
-                if (i == lv.drag) r.setAlpha(0f); // the floating copy is drawn by the list while dragging
+                if (i == lv.drag) r.setAlpha(0f);
                 return r;
             }
         };
@@ -561,7 +820,7 @@ public class MainActivity extends Activity implements Engine.L {
         });
         int maxH = Math.min(Ui.dp(this, 56) * Math.max(1, engine.queue.size()), root.getHeight() * 50 / 100);
         box.addView(lv, new LinearLayout.LayoutParams(Ui.MATCH, maxH));
-        // open on the item that is playing, centered in the list
+
         lv.post(() -> {
             if (engine.idx >= 0 && engine.idx < engine.queue.size())
                 lv.setSelectionFromTop(engine.idx, Math.max(0, (lv.getHeight() - Ui.dp(this, 56)) / 2));
@@ -574,7 +833,6 @@ public class MainActivity extends Activity implements Engine.L {
         root.addView(layer, new FrameLayout.LayoutParams(Ui.MATCH, Ui.MATCH));
     }
 
-    /** The 3-dots menu in the queue header. */
     void queueMenu() {
         if (engine.queue.isEmpty()) { toast("The queue is empty"); return; }
         Ui.Sheet sh = new Ui.Sheet(this, "Play queue", engine.queue.size() + " items");
@@ -588,7 +846,6 @@ public class MainActivity extends Activity implements Engine.L {
         sh.show();
     }
 
-    /** Audios and videos have separate playlists, so a mixed queue asks which part to add. */
     void addQueuePlaylist(List<Media> src) {
         if (src.isEmpty()) { toast("Nothing to add"); return; }
         final List<Media> au = new ArrayList<>(), vi = new ArrayList<>();
@@ -609,7 +866,6 @@ public class MainActivity extends Activity implements Engine.L {
         return l;
     }
 
-    /** Row of actions shown while "Select Item" is on: All / Add Queue Playlist / Clear Queue / Done. */
     LinearLayout buildQueueSelBar() {
         LinearLayout bar = new LinearLayout(this);
         bar.setPadding(Ui.dp(this, 12), 0, Ui.dp(this, 6), Ui.dp(this, 8));
@@ -631,7 +887,7 @@ public class MainActivity extends Activity implements Engine.L {
     }
 
     void queueSelAction(int k) {
-        if (k == 0) { // all / none
+        if (k == 0) {
             boolean all = qSel.size() == engine.queue.size();
             qSel.clear();
             if (!all) for (int i = 0; i < engine.queue.size(); i++) qSel.add(i);
@@ -658,7 +914,6 @@ public class MainActivity extends Activity implements Engine.L {
         refreshQueueMode();
     }
 
-    /** Shows / hides the select-mode bar, switches the hint and the drag handle, redraws the rows. */
     void refreshQueueMode() {
         if (queueSelBar != null) queueSelBar.setVisibility(qSelMode ? View.VISIBLE : View.GONE);
         if (queueHint != null) queueHint.setText(qSelMode ? "Tap items to select them."
@@ -689,7 +944,6 @@ public class MainActivity extends Activity implements Engine.L {
         sh.show();
     }
 
-    // ---------- item options modal ----------
     void showOptions(final Media m, final Runnable removeFn) {
         Ui.Sheet sh = new Ui.Sheet(this, m.title, m.artist);
         Media cur = engine.cur();
@@ -704,17 +958,22 @@ public class MainActivity extends Activity implements Engine.L {
                     if (i < 0) { l = Collections.singletonList(m); i = 0; }
                     engine.play(new ArrayList<>(l), i);
                 }
-                closePlayer(); // same as pressing the X button
+                closePlayer();
             });
         }
-        sh.item(R.drawable.ic_add_queue, "Add in play queue", Ui.TXT, () -> { engine.addToQueue(m); toast("Added to queue"); });
-        sh.item(R.drawable.ic_play_next, "Play next", Ui.TXT, () -> { engine.playNext(m); toast("Playing next"); });
+        sh.item(R.drawable.ic_add_queue, "Add in play queue", Ui.TXT, () -> toast(engine.addToQueue(m) ? "Added to queue" : "Already in queue"));
+        sh.item(R.drawable.ic_play_next, "Play next", Ui.TXT, () -> {
+            int r = engine.playNext(m);
+            toast(r == Engine.NEXT_SAME ? "Already playing" : r == Engine.NEXT_MOVED ? "Moved to play next" : "Playing next");
+        });
         sh.item(R.drawable.ic_playlist, "Add in playlist", Ui.TXT, () -> pickPlaylist(Collections.singletonList(m), null));
         boolean f = store.isFav(m);
         sh.item(f ? R.drawable.ic_heart_fill : R.drawable.ic_heart, f ? "Remove from favorites" : "Add to favorites", Ui.TXT,
                 () -> { store.toggleFav(m); refreshAll(); player.changed(); });
         if (removeFn != null) sh.item(R.drawable.ic_close, "Remove from playlist", Ui.TXT, removeFn);
         sh.item(R.drawable.ic_edit, "Rename", Ui.TXT, () -> promptName("Rename", m.title, n -> doRename(m, n)));
+        sh.item(R.drawable.ic_edit, "Advanced Editor", Ui.TXT, () -> meta.open(m));
+        sh.item(R.drawable.ic_info, "Info", Ui.TXT, () -> meta.info(m));
         sh.item(R.drawable.ic_delete, m.video ? "Delete Video" : "Delete Audio", Ui.RED, () -> confirmDeleteMany(Collections.singletonList(m), null));
         sh.show();
     }
@@ -734,9 +993,11 @@ public class MainActivity extends Activity implements Engine.L {
     }
 
     void addAllTo(List<Media> ms, String n) {
-        for (Media m : ms) store.addToPlaylist(m, n);
+        int added = store.addAllToPlaylist(ms, n);
         refreshAll();
-        toast("Added to " + n);
+        toast(added == 0 ? "Already in " + n
+                : added < ms.size() ? added + " added to " + n + " (" + (ms.size() - added) + " already in it)"
+                : "Added to " + n);
     }
 
     void promptName(String title, final Consumer<String> done) { promptName(title, "", done); }
@@ -749,7 +1010,6 @@ public class MainActivity extends Activity implements Engine.L {
 
     void confirmDanger(String title, String msg, String ok, final Runnable r) { Ui.confirm(this, title, msg, ok, true, r); }
 
-    // ---------- rename ----------
     static String ext(String fileName) {
         if (fileName == null) return "";
         int dot = fileName.lastIndexOf('.');
@@ -763,7 +1023,6 @@ public class MainActivity extends Activity implements Engine.L {
         applyRename(m, n, false);
     }
 
-    /** Files found by the hidden scan: plain file rename (needs All files access). */
     void renameHiddenFile(Media m, String n) {
         File f = new File(m.filePath);
         String dn = f.getName();
@@ -781,7 +1040,6 @@ public class MainActivity extends Activity implements Engine.L {
         finishRename(m, n);
     }
 
-    /** MediaStore files: needs the user's OK once (system dialog) unless All files access is on. */
     void applyRename(Media m, String n, boolean granted) {
         ContentValues v = new ContentValues();
         v.put(MediaStore.MediaColumns.DISPLAY_NAME, n + ext(m.name));
@@ -810,7 +1068,6 @@ public class MainActivity extends Activity implements Engine.L {
         toast("Renamed");
     }
 
-    // ---------- delete ----------
     void confirmDeleteMany(final List<Media> ms, final Runnable after) {
         if (ms.isEmpty()) return;
         boolean one = ms.size() == 1;
@@ -865,6 +1122,12 @@ public class MainActivity extends Activity implements Engine.L {
             }
             pendingDel = new ArrayList<>();
             pendingDelAfter = null;
+        } else if (req == IconOverride.REQ) {
+            IconOverride.onPicked(this, res, data);
+        } else if (req == IconOverride.REQ_SAVE) {
+            IconOverride.onSaved(this, res, data);
+        } else if (req == HomeAdd.REQ_ICON) {
+            HomeAdd.onPicked(this, res, data);
         } else if (req == 80) {
             if (res == RESULT_OK && data != null && data.getData() != null) writeBackup(data.getData());
         } else if (req == 81) {
@@ -873,6 +1136,18 @@ public class MainActivity extends Activity implements Engine.L {
             if (res == RESULT_OK && data != null && data.getData() != null && pendingCapMedia != null)
                 importCaptions(pendingCapMedia, data.getData());
             pendingCapMedia = null;
+        } else if (req == MetaEditor.REQ_TAGS) {
+            meta.onTagPermission(res);
+        } else if (req == PhotoEditor.REQ_FONT) {
+            editor.onFontResult(res, data);
+        } else if (req == PhotoEditor.REQ_WRITE) {
+            editor.onWriteResult(res);
+        } else if (req == MetaEditor.REQ_COVER) {
+            meta.onCoverResult(res, data);
+        } else if (req == PhotoOps.REQ_DEL) {
+            pops.onDeleteResult(res);
+        } else if (req == PhotoOps.REQ_REN) {
+            pops.onRenameResult(res);
         } else if (req == 78) {
             if (res == RESULT_OK && pendingRen != null) applyRename(pendingRen, pendingRenName, true);
             pendingRen = null;
@@ -880,8 +1155,6 @@ public class MainActivity extends Activity implements Engine.L {
         }
     }
 
-    // ---------- captions ----------
-    /** Asks for a subtitle file (system picker, no storage permission needed). */
     void pickCaptions(Media m) {
         pendingCapMedia = m;
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -915,21 +1188,48 @@ public class MainActivity extends Activity implements Engine.L {
         }
     }
 
-    // ---------- spectrum toggles ----------
+    private boolean specChecked;
+
+    /**
+     * The spectrum / Vibe needs the Microphone permission to read the sound the app plays. If it was turned on by
+     * a restored backup (or the permission was revoked later) nothing ever asked, so the visual just sat there
+     * drawing silence. Ask again here; once per app run so it never nags.
+     */
+    void checkSpecPermission() {
+        if (specChecked || Engine.SAVER) return;
+        String key = store.bool("spec_player", false) ? "spec_player" : store.bool("spec_sync", false) ? "spec_sync" : null;
+        if (key == null || engine.spec.permitted()) return;
+        specChecked = true;
+        specToggled(key);
+    }
+
     void specToggled(final String key) {
         if (store.bool(key, false) && !engine.spec.permitted()) {
+
+            if (store.bool("mic_asked", false) && !shouldShowRequestPermissionRationale("android.permission.RECORD_AUDIO")) {
+                store.setBool(key, false);
+                rebuildUi();
+                micBlocked();
+                return;
+            }
             Ui.confirm(this, "Allow audio access?",
                     "Android only lets an app read the audio spectrum with the Microphone permission. Nothing is recorded, "
                             + "the app only looks at the sound it is playing itself.", "Continue", false,
-                    () -> { pendingSpecKey = key; requestPermissions(new String[]{"android.permission.RECORD_AUDIO"}, 2); },
+                    () -> { pendingSpecKey = key; store.setBool("mic_asked", true); requestPermissions(new String[]{"android.permission.RECORD_AUDIO"}, 2); },
                     () -> { store.setBool(key, false); rebuildUi(); });
             return;
         }
+        engine.spec.retry();
         engine.spec.update();
-        engine.fire(); // redraw rows + player with the new setting
+        engine.fire();
     }
 
-    // ---------- backup / restore (system file picker, so no storage permission is needed) ----------
+    void micBlocked() {
+        Ui.confirm(this, "Allow microphone in settings", "Android no longer shows the permission question. Open the app settings, "
+                + "tap Permissions > Microphone > Allow, come back and turn the spectrum on again. Nothing is recorded.",
+                "Open settings", false, this::openAppSettings);
+    }
+
     Uri restoreUri;
 
     void createBackup() {
@@ -957,32 +1257,52 @@ public class MainActivity extends Activity implements Engine.L {
 
     void writeBackup(Uri u) {
         try (OutputStream os = getContentResolver().openOutputStream(u, "wt")) {
-            Backup.create(store, byKey, os);
+            Backup.create(this, store, byKey, photoByKey, os);
             Ui.notice(this, "Backup created", "Saved as " + displayName(u) + "\n\n" + store.list("fav").size() + " favorites, "
                     + store.playlists(false).size() + " audio playlists, " + store.playlists(true).size() + " video playlists, "
-                    + store.capKeys().size() + " captions.");
+                    + store.capKeys().size() + " captions, " + store.list("pfav").size() + " photo favorites, "
+                    + store.collections().size() + " photo collections and your settings.");
         } catch (Exception e) {
             Ui.notice(this, "Backup failed", "The backup could not be written. Try another location.");
         }
     }
 
     void askRestore(final Uri u) {
-        confirm("Restore backup?", "Your current favorites and playlists will be replaced by the ones in " + displayName(u)
-                        + ". Captions in it are added to the ones you have.",
-                "Restore", () -> {
-                    try (InputStream is = getContentResolver().openInputStream(u)) {
-                        Backup.Result r = Backup.restore(store, byKey, is);
-                        refreshAll();
-                        player.changed();
-                        Ui.notice(this, "Backup restored", r.favorites + " favorites, " + r.audioPlaylists + " audio playlists, "
-                                + r.videoPlaylists + " video playlists, " + r.captions + " captions.");
-                    } catch (Exception e) {
-                        Ui.notice(this, "Restore failed", "That file is not a Vidsic backup, or it is damaged. Nothing was changed.");
-                    }
-                });
+        Ui.choose(this, "Restore backup?",
+                "Merge keeps what you have now and only adds what is in " + displayName(u)
+                        + " (new favorites, playlists and items, and settings you never changed).\n\n"
+                        + "Replace swaps your favorites, playlists, collections and settings for the ones in the backup.",
+                "Merge", false, () -> restore(u, false),
+                "Replace", true, () -> restore(u, true));
     }
 
-    // ---------- settings (grouped in cards) ----------
+    void restore(Uri u, boolean replace) {
+        try (InputStream is = getContentResolver().openInputStream(u)) {
+            Backup.Result r = Backup.restore(store, byKey, photoByKey, is, replace);
+            engine.reloadSettings();
+            rebuildUi();
+            specChecked = false;
+            h.postDelayed(this::checkSpecPermission, 1500);
+            if (store.bool("img_on", false) && !imageOk()) requestPermissions(perms(), 3);
+            loadMedia();
+            player.changed();
+            String restoredSummary = r.favorites + (replace ? " favorites, " : " new favorites, ")
+                    + r.audioPlaylists + " audio playlists, " + r.videoPlaylists + " video playlists, "
+                    + r.photoFavorites + (replace ? " photo favorites, " : " new photo favorites, ")
+                    + r.collections + " photo collections, " + r.captions + " captions, "
+                    + r.settings + " settings.";
+            if (!r.legacyEdits.isEmpty()) {
+                restoredSummary += "\n\nThis older backup also contains legacy metadata edits. Vidsic will apply them to the original files next; Android may ask for permission.";
+                Ui.notice(this, replace ? "Backup restored" : "Backup merged", restoredSummary,
+                        () -> meta.applyRestoredEdits(r.legacyEdits));
+            } else {
+                Ui.notice(this, replace ? "Backup restored" : "Backup merged", restoredSummary);
+            }
+        } catch (Exception e) {
+            Ui.notice(this, "Restore failed", "That file is not a Vidsic backup, or it is damaged. Nothing was changed.");
+        }
+    }
+
     LinearLayout group(LinearLayout col, String title) {
         TextView v = Ui.text(this, title, 13, Ui.ACC, true);
         v.setPadding(Ui.dp(this, 20), Ui.dp(this, 20), Ui.dp(this, 16), Ui.dp(this, 8));
@@ -997,7 +1317,6 @@ public class MainActivity extends Activity implements Engine.L {
         return card;
     }
 
-    /** Adds a row to a card with a thin divider above it (except for the first row). */
     void add(LinearLayout card, View row) {
         if (card.getChildCount() > 0) {
             View d = new View(this);
@@ -1058,7 +1377,7 @@ public class MainActivity extends Activity implements Engine.L {
     }
 
     String versionName() {
-        try { return getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception e) { return "1.0"; }
+        try { return getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (Exception e) { return "36.0"; }
     }
 
     ScrollView buildSettings() {
@@ -1076,9 +1395,7 @@ public class MainActivity extends Activity implements Engine.L {
         String th = store.p.getString("theme", "app");
         chips(card, new String[]{"App", "Device", "Customize"}, new String[]{"app", "device", "custom"}, th,
                 v -> { store.p.edit().putString("theme", v).apply(); rebuildUi(); });
-        if (th.equals("device"))
-            note(card, Build.VERSION.SDK_INT >= 31 ? "Using your Android (Material You) colors. Follows light/dark mode of the device."
-                    : "Device colors need Android 12 or newer. Using the App theme instead.");
+        if (th.equals("device") && Build.VERSION.SDK_INT < 31) note(card, "Needs Android 12 or newer.");
         if (th.equals("custom")) {
             note(card, "Base");
             chips(card, new String[]{"Dark", "Light", "Black"}, new String[]{"dark", "light", "black"},
@@ -1087,36 +1404,55 @@ public class MainActivity extends Activity implements Engine.L {
             swatches(card);
         }
 
-        card = group(col, "LIBRARY");
-        toggle(card, "Show hidden audios", "Audios in .nomedia / dot folders or dot files", "hid_a", false, this::hiddenChanged);
-        toggle(card, "Show hidden videos", "Videos in .nomedia / dot folders or dot files", "hid_v", false, this::hiddenChanged);
-        toggle(card, "Show hidden folders", "List hidden folders in the Folders tab", "hid_f", false, this::hiddenChanged);
-        action(card, R.drawable.ic_folder, "All files access", () -> openAllFiles());
-        note(card, "Hidden items need \"All files access\" so the app can look past what Android indexes.");
-        stats = Ui.text(this, "", 12, Ui.SUB, false);
-        stats.setSingleLine(false);
-        stats.setPadding(Ui.dp(this, 16), Ui.dp(this, 10), Ui.dp(this, 16), Ui.dp(this, 10));
-        add(card, stats);
-        refreshStats();
-        action(card, R.drawable.ic_folder, "Rescan library", () -> { loadMedia(); toast("Scanning..."); });
-        toggle(card, "Auto rescan library", "Rescan when you open the app and when files are added, removed or renamed",
-                "auto_rescan", false, () -> { if (store.bool("auto_rescan", false)) loadMedia(); });
-        action(card, R.drawable.ic_settings, "Grant media access", () -> {
-            requestPermissions(perms(), 1);
-            try {
-                startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName())));
-            } catch (Exception e) { }
+        card = group(col, "DRAWABLES");
+        toggle(card, "Override Drawable", "Replace the app's icons with your own", Ic.PREF_ON, false, () -> {
+            Ic.invalidate();
+            engine.fire();
+            rebuildUi();
         });
+        if (store.bool(Ic.PREF_ON, false)) {
+            action(card, R.drawable.ic_edit, "Advance Drawable", () -> IconOverride.open(this));
+            note(card, "Pick an icon, change it with your own .xml vector, then press Apply.");
+        }
+
+        card = group(col, "LIBRARY");
+        toggle(card, "Show hidden audios", "Include audio other apps can't see", "hid_a", false, this::hiddenChanged);
+        toggle(card, "Show hidden videos", "Include videos other apps can't see", "hid_v", false, this::hiddenChanged);
+        toggle(card, "Show hidden folders", "Show them in the Folders tab", "hid_f", false, this::hiddenChanged);
+        action(card, R.drawable.ic_folder, "All files access", () -> openAllFiles());
+        note(card, "Needed to find hidden files.");
+        action(card, R.drawable.ic_folder, "Rescan library", () -> { loadMedia(); toast("Scanning..."); });
+        toggle(card, "Auto rescan library", "Keep the list up to date by itself",
+                "auto_rescan", false, () -> { if (store.bool("auto_rescan", false)) loadMedia(); });
+        action(card, R.drawable.ic_settings, "Grant media access", this::grantAccess);
+        toggle(card, "Search Specified", "Search only inside the folder, album, playlist or other group you have open, not the whole list",
+                "search_scope", false, () -> { refreshAll(); });
 
         card = group(col, "PLAYBACK");
         toggle(card, "Play next automatically", "Continue with the next item in the queue", "autonext", true, null);
-        toggle(card, "Screen Wake Lock", "The device won't turn the screen off by itself while the app is open",
+        toggle(card, "Screen Wake Lock", "Keep the screen on while playing",
                 "wake_lock", true, () -> { if (player != null) player.updateKeepOn(); });
         toggle(card, "Show history", "Show recently played at the top of Audios / Videos", "showhist", true, null);
+        toggle(card, "Allow play queue duplication", "Let the same item be in the queue more than once", "q_dup", false, null);
+
+        card = group(col, "BATTERY");
+        toggle(card, "Battery Saving Mode", "Pauses visual effects and background extras", "batt_saver", false, () -> {
+            engine.powerChanged();
+            if (player != null) player.updateKeepOn();
+            rebuildUi();
+        });
+        toggle(card, "Follow system Battery Saver", "Turn on together with Android's Battery Saver",
+                "batt_auto", false, () -> {
+            engine.powerChanged();
+            if (player != null) player.updateKeepOn();
+            rebuildUi();
+        });
+        note(card, Engine.SAVER ? "Battery Saving Mode is on." : "Off. Audio spectrum, Vibe, auto rescan and Bluetooth auto-play rest while it is on.");
 
         card = group(col, "HEADSET");
         toggle(card, "Auto-play via bluetooth", "Resume playing when a bluetooth headset or speaker connects", "bt_play", false, null);
         toggle(card, "Pause when headphones detach", "Pause music when the headphones are unplugged or disconnect", "pause_detach", true, null);
+        toggle(card, "Volume auto pause", "Pause when the volume reaches 0 and play again when it is turned up", "vol_pause", false, null);
 
         card = group(col, "HISTORY");
         action(card, R.drawable.ic_history, "Clear play history", () ->
@@ -1135,18 +1471,24 @@ public class MainActivity extends Activity implements Engine.L {
         card = group(col, "BACKUP");
         action(card, R.drawable.ic_backup, "Create Backup", this::createBackup);
         action(card, R.drawable.ic_restore, "Restore Backup", this::pickBackup);
-        note(card, "A vidsic_backup zip with your favorites, your audio and video playlists (separate files) and the captions you imported.");
+        note(card, "Saves your settings, favorites, playlists and edits to a file.");
 
         card = group(col, "VISUALIZER");
-        toggle(card, "Audio Spectrum Sync", "The bars next to the playing item follow the real audio instead of a preset animation",
+        toggle(card, "Audio Spectrum Sync", "Bars move with the actual sound",
                 "spec_sync", false, () -> specToggled("spec_sync"));
-        toggle(card, "Audio Player Spectrum", "In the player, show a live audio spectrum instead of the thumbnail / music note",
+        toggle(card, "Audio Player Spectrum", "Show the visualizer in the player",
                 "spec_player", false, () -> specToggled("spec_player"));
         note(card, "Visual");
         chips(card, new String[]{"Bar", "Vibe"}, new String[]{"bar", "vibe"}, store.p.getString("viz_mode", "bar"),
                 v -> { store.p.edit().putString("viz_mode", v).apply(); engine.fire(); rebuildUi(); });
-        note(card, "Bar: the classic mirrored bars. Vibe: listens to the sound live, senses the mood (sad, moody, chill, party, EDM, intense) "
-                + "and restyles itself. Shown in the player when Audio Player Spectrum is on.");
+        note(card, "Bar: classic bars. Vibe: a visual that reacts to the mood of the music.");
+
+        card = group(col, "IMAGE VIEWER");
+        toggle(card, "Image Viewer", "Adds a Photos tab for your pictures",
+                "img_on", false, this::imageViewerChanged);
+        if (store.bool("img_on", false)) {
+            action(card, R.drawable.ic_slideshow, "Slideshow settings", () -> PhotoViewer.slideshowSettings(this, null));
+        }
 
         card = group(col, "ABOUT");
         LinearLayout about = new LinearLayout(this);
@@ -1166,6 +1508,7 @@ public class MainActivity extends Activity implements Engine.L {
     }
 
     void refreshStats() {
+        if (stats == null) return;
         stats.setText(audios.size() + " audios, " + videos.size() + " videos found\nAudio access: " + (audioOk() ? "yes" : "NO")
                 + "  |  Video access: " + (videoOk() ? "yes" : "NO")
                 + "  |  All files: " + (Environment.isExternalStorageManager() ? "yes" : "no"));
@@ -1177,6 +1520,17 @@ public class MainActivity extends Activity implements Engine.L {
         } catch (Exception e) {
             try { startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)); } catch (Exception e2) { }
         }
+    }
+
+    void imageViewerChanged() {
+        boolean on = store.bool("img_on", false);
+        if (on && !imageOk()) requestPermissions(perms(), 3);
+        if (!on && viewer != null) viewer.close();
+        photos = new ArrayList<>();
+        photoByKey.clear();
+        page = P_SET;
+        rebuildUi();
+        if (on) loadMedia();
     }
 
     void hiddenChanged() {
@@ -1192,17 +1546,19 @@ public class MainActivity extends Activity implements Engine.L {
         LinearLayout c = new LinearLayout(this);
         c.setOrientation(LinearLayout.VERTICAL);
         c.addView(Ui.text(this, title, 16, Ui.TXT, false));
-        TextView st = Ui.text(this, sub, 12, Ui.SUB, false);
-        st.setSingleLine(false);
-        c.addView(st);
+        if (sub != null && !sub.isEmpty()) {
+            TextView st = Ui.text(this, sub, 12, Ui.SUB, false);
+            st.setSingleLine(false);
+            c.addView(st);
+        }
         row.addView(c, new LinearLayout.LayoutParams(0, Ui.WRAP, 1));
         Switch sw = new Switch(this);
-        Ui.tintSwitch(sw); // accent of the chosen theme, not the manifest's violet
+        Ui.tintSwitch(sw);
         sw.setChecked(store.bool(key, def));
         sw.setOnCheckedChangeListener((b, on) -> {
             store.setBool(key, on);
             if (onChange != null) onChange.run();
-            else if (!key.equals("bt_play") && !key.equals("pause_detach")) refreshAll();
+            else if (!key.equals("bt_play") && !key.equals("pause_detach") && !key.equals("vol_pause")) refreshAll();
         });
         row.addView(sw);
         add(card, row);

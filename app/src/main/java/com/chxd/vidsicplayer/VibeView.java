@@ -18,22 +18,17 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Random;
 
-/**
- * "Vibe" visual for the player. It does not know the song: it listens to the live spectrum, measures energy, bass,
- * brightness, how fast the sound changes and the beat, scores six moods from that and restyles itself (colors, speed,
- * trails, shake, flashes, gravity of the particles) with smooth transitions.
- */
 class VibeView extends View {
     static final int N = Spectrum.BANDS;
-    // target feature vector per mood: energy, bass, brightness, flux
+
     static final float[][] T = {
-            {.22f, .40f, .22f, .18f},   // sad
-            {.38f, .62f, .32f, .30f},   // moody
-            {.48f, .45f, .50f, .32f},   // chill
-            {.68f, .62f, .66f, .62f},   // party
-            {.90f, .92f, .62f, .82f},   // edm
-            {.86f, .62f, .88f, .88f}};  // intense
-    // look per mood: hue, spread, sat, light, trail, speed, len, gravity, shake, flash, hueSpeed, burst
+            {.22f, .40f, .22f, .18f},
+            {.38f, .62f, .32f, .30f},
+            {.48f, .45f, .50f, .32f},
+            {.68f, .62f, .66f, .62f},
+            {.90f, .92f, .62f, .82f},
+            {.86f, .62f, .88f, .88f}};
+
     static final float[][] L = {
             {212, 40, 55, 58, .07f, .12f, .9f, .5f, 0, 0, 2, 6},
             {272, 70, 70, 55, .09f, .22f, 1.1f, .05f, .2f, 0, 4, 10},
@@ -57,7 +52,7 @@ class VibeView extends View {
     final ArrayList<Ring> rings = new ArrayList<>();
     Bitmap bmp;
     Canvas bc;
-    static final float SCALE = 0.5f; // the picture is drawn at half size and scaled up: soft glow, much cheaper
+    static final float SCALE = 0.5f;
 
     final float[] P = new float[12];
     final float[] score = new float[6];
@@ -68,11 +63,11 @@ class VibeView extends View {
     float fe, fb, fc = .3f, ff, fluxPeak = .02f, bassAvg, bpm, beat, flash, rot, hueShift;
     long lastBeat;
     boolean beatNow;
-    // left / right: how much each speaker drives each band (1 = full). Both 1 when the sound is centred or not analysed (yet).
+
     final float[] gl = new float[N], gr = new float[N];
     StereoMap map;
     String mapKey = "";
-    float ref, focusY; // set by the player: size of the artwork square and the y of its centre (0 = use own size / middle)
+    float ref, focusY;
 
     VibeView(Context c) {
         super(c);
@@ -91,15 +86,14 @@ class VibeView extends View {
         if (w <= 0 || h <= 0) return;
         bmp = Bitmap.createBitmap(Math.max(1, (int) (w * SCALE)), Math.max(1, (int) (h * SCALE)), Bitmap.Config.ARGB_8888);
         bc = new Canvas(bmp);
-        bc.scale(SCALE, SCALE);
         bc.drawColor(0xFF05060A);
         parts.clear();
         rings.clear();
+        bc.scale(SCALE, SCALE);
     }
 
     static float clamp(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
-    /** CSS-style hsl(h, s%, l%) with alpha 0..1 -> ARGB. */
     static int hsl(float h, float s, float l, float a) {
         h = ((h % 360f) + 360f) % 360f;
         s = clamp(s / 100f, 0, 1);
@@ -116,7 +110,6 @@ class VibeView extends View {
         return Color.argb((int) (clamp(a, 0, 1) * 255), (int) ((r + m) * 255), (int) ((g + m) * 255), (int) ((bl + m) * 255));
     }
 
-    /** Starts / switches the background left-right analysis for the playing file, and eases gl / gr toward it. */
     void updatePan(boolean real) {
         Media m = en.cur();
         String key = m == null ? "" : m.key();
@@ -146,7 +139,6 @@ class VibeView extends View {
         super.onDetachedFromWindow();
     }
 
-    /** Reads the engine's spectrum into b[] (real FFT when available, a simulated animation otherwise, silence when paused). */
     void fetch(boolean playing, boolean real, double t) {
         for (int i = 0; i < N; i++) {
             if (playing && real) { b[i] = en.spec.bands[i]; continue; }
@@ -160,7 +152,6 @@ class VibeView extends View {
         }
     }
 
-    /** Features -> beat -> mood scores. Only runs on real audio. */
     void analyse() {
         float sum = 0, wsum = 0, flux = 0, bass = 0;
         for (int i = 0; i < N; i++) {
@@ -187,7 +178,6 @@ class VibeView extends View {
             silence = 0;
         } else silence++;
 
-        // beat: bass jumping over its own running average
         bassAvg += (bass - bassAvg) * .04f;
         long now = SystemClock.uptimeMillis();
         if (bass > bassAvg * 1.2f && bass > .22f && now - lastBeat > 240) {
@@ -208,7 +198,6 @@ class VibeView extends View {
             }
         }
 
-        // mood scores
         float[] v = {fe, fb, fc, ff};
         for (int k = 0; k < 6; k++) {
             float d = 0;
@@ -252,7 +241,6 @@ class VibeView extends View {
         if (real) analyse();
         updatePan(real);
 
-        // ease the look toward the current mood
         float[] M = L[mood];
         for (int i = 0; i < 12; i++) P[i] += (M[i] - P[i]) * .025f;
         hueShift += P[10] * .016f;
@@ -267,7 +255,6 @@ class VibeView extends View {
         float maxB = 0;
         for (int i = 0; i < N; i++) maxB = Math.max(maxB, b[i]);
 
-        // trails: paint the old frame over with a translucent dark tint
         bc.drawColor(hsl(hue, 45, 3 + flash * P[9] * 40, P[4]));
 
         bc.save();
@@ -275,7 +262,6 @@ class VibeView extends View {
             bc.translate((rnd.nextFloat() - .5f) * beat * P[8] * 10 * k, (rnd.nextFloat() - .5f) * beat * P[8] * 10 * k);
         rot += P[5] * .004f * (1 + bassV * 2);
 
-        // orb (normal blending, under the bars, so it keeps its color instead of piling up to white)
         float orb = R * (.62f + bassV * .28f + beat * .1f);
         orbP.setShader(new RadialGradient(cx, cy, Math.max(1f, orb), new int[]{
                 hsl(hue, P[2], P[3] + 8, .45f + beat * .25f), hsl(hue + P[1] * .4f, P[2], P[3] - 6, .18f), 0},
@@ -283,8 +269,6 @@ class VibeView extends View {
         bc.drawCircle(cx, cy, orb, orbP);
         orbP.setShader(null);
 
-
-        // radial spectrum, mirrored left / right
         final int BN = 128;
         stroke.setStrokeWidth(Math.max(2 * k, R * .035f));
         for (int i = 0; i < BN; i++) {
@@ -293,7 +277,7 @@ class VibeView extends View {
             int i0 = (int) f, i1 = Math.min(N - 1, i0 + 1);
             float fr = f - i0, v = b[i0] * (1 - fr) + b[i1] * fr;
             float a = i / (float) BN * 6.2832f + rot, c = (float) Math.cos(a), s = (float) Math.sin(a);
-            // left side of the screen listens to the left speaker, right side to the right one (smooth blend near the middle)
+
             float tt = clamp((c + .3f) / .6f, 0, 1), wr = tt * tt * (3 - 2 * tt);
             int bi = Math.min(N - 1, Math.round(f));
             v *= gl[bi] * (1 - wr) + gr[bi] * wr;
@@ -307,7 +291,6 @@ class VibeView extends View {
             bc.drawLine(cx + c * r0, cy + s * r0, cx + c * (r0 - len * .3f), cy + s * (r0 - len * .22f), stroke);
         }
 
-        // waveform ring: the real waveform wrapped around a circle (a smooth circle when calm, like the HTML)
         stroke.setXfermode(null);
         stroke.setStrokeWidth(1.5f * k + .5f);
         stroke.setColor(hsl(hue + P[1] * .5f, P[2], 75, .8f));
@@ -324,7 +307,6 @@ class VibeView extends View {
         bc.drawPath(path, stroke);
         stroke.setXfermode(ADD);
 
-        // beat events: shock ring + particle burst
         if (beatNow) {
             beatNow = false;
             Ring q = new Ring();
@@ -357,7 +339,6 @@ class VibeView extends View {
         }
         bc.restore();
 
-        // floor glow that breathes with the bass
         fill.setShader(new LinearGradient(0, h, 0, h * .6f, hsl(hue, P[2], 50, .06f + bassV * .28f), 0, Shader.TileMode.CLAMP));
         bc.drawRect(0, h * .6f, w, h, fill);
         fill.setShader(null);
@@ -365,6 +346,6 @@ class VibeView extends View {
         dst.set(0, 0, w, h);
         cv.drawBitmap(bmp, null, dst, blit);
 
-        if (playing || !parts.isEmpty() || !rings.isEmpty() || maxB > .01f || beat > .02f) postInvalidateOnAnimation();
+        if (playing || !parts.isEmpty() || !rings.isEmpty() || maxB > .01f || beat > .02f) Ui.frame(this);
     }
 }

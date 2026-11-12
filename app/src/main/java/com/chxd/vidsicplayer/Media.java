@@ -7,13 +7,13 @@ class Media {
     long id;
     Uri uri;
     String title, artist, album, folder, path, name;
+    String genre = "", desc = "";
     long duration, added, size;
     boolean video, hidden, folderHidden;
-    String filePath; // set only for files found by the hidden-file scan
+    String filePath;
 
     String key() { return (video ? "v" : "a") + id; }
 
-    /** Everything needed to rebuild this item without scanning the library (saved play queue). */
     JSONObject toJson() throws Exception {
         JSONObject o = new JSONObject();
         o.put("id", id);
@@ -31,6 +31,8 @@ class Media {
         o.put("h", hidden);
         o.put("fh", folderHidden);
         o.put("fp", filePath);
+        o.put("g", genre);
+        o.put("ds", desc);
         return o;
     }
 
@@ -53,6 +55,8 @@ class Media {
         m.hidden = o.optBoolean("h");
         m.folderHidden = o.optBoolean("fh");
         m.filePath = o.isNull("fp") ? null : o.optString("fp", null);
+        m.genre = o.optString("g", "");
+        m.desc = o.optString("ds", "");
         return m;
     }
 }

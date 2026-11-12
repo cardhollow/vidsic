@@ -8,19 +8,15 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.widget.ListView;
 
-/**
- * Play-queue list with drag & drop. Grab the 3-bar handle on the left of a row and move it;
- * the list scrolls by itself near the top / bottom edge. Reports every step through {@link Cb}.
- */
 class QueueList extends ListView {
     interface Cb {
-        void move(int from, int to); // dragged row moved from one position to another
-        void done();                 // finger lifted
+        void move(int from, int to);
+        void done();
     }
 
     Cb cb;
     int drag = -1;
-    boolean noDrag; // select mode: the handle does nothing
+    boolean noDrag;
     float y, grab;
     Bitmap shot;
     final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);

@@ -9,19 +9,13 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.ShortBuffer;
 
-/**
- * Android's Visualizer only hands out a mono mix, so to know what the LEFT and the RIGHT speaker are doing this
- * decodes the playing file in the background (much faster than real time) and stores, 30 times a second and for each of
- * the {@link Spectrum#BANDS} bands, how the energy is split between left and right (0 = all left, 255 = all right).
- * The Vibe visual then pushes each side of its circle with its own channel. Nothing is recorded or kept after the song.
- */
 class StereoMap {
     static final int FPS = 30, FFT = 1024, BANDS = Spectrum.BANDS;
 
     final Uri uri;
     final Context ctx;
-    volatile byte[] pan = new byte[0];  // frame * BANDS + band
-    volatile int filled;                // frames ready so far
+    volatile byte[] pan = new byte[0];
+    volatile int filled;
     volatile boolean stop, done, failed;
     Thread th;
 
@@ -35,7 +29,6 @@ class StereoMap {
 
     void cancel() { stop = true; }
 
-    /** Right-channel share (0..1) of a band at a playback position, or -1 when that part is not analysed (yet). */
     float right(int ms, int band) {
         int f = (int) ((long) ms * FPS / 1000);
         byte[] p = pan;
@@ -127,12 +120,11 @@ class StereoMap {
         }
     }
 
-    /** Hann-windowed 1024 point FFT magnitudes (bins 0 .. 511) of x. im is scratch space. */
     static void mags(float[] x, float[] win, float[] im, float[] mag) {
         int n = FFT;
         float[] re = new float[n];
         for (int i = 0; i < n; i++) { re[i] = x[i] * win[i]; im[i] = 0; }
-        for (int i = 1, j = 0; i < n; i++) { // bit reversal
+        for (int i = 1, j = 0; i < n; i++) {
             int bit = n >> 1;
             for (; (j & bit) != 0; bit >>= 1) j ^= bit;
             j ^= bit;
@@ -157,7 +149,6 @@ class StereoMap {
         for (int i = 0; i < n / 2; i++) mag[i] = (float) Math.sqrt(re[i] * re[i] + im[i] * im[i]);
     }
 
-    /** Same log-spaced bands as {@link Spectrum#fold}; stores the right share of each band as a byte (128 = centred / silent). */
     static void fold(float[] mL, float[] mR, byte[] out, int off) {
         int bins = mL.length;
         double lo = 1, hi = bins * 0.62;

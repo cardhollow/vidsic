@@ -23,16 +23,11 @@ import java.util.ArrayList;
 import java.util.Locale;
 import java.util.function.IntFunction;
 
-/**
- * Caption style (all keys start with "cc_" in the app preferences; the defaults are the look the player always had)
- * and the "Caption settings" screen that edits it with a live preview.
- */
 class CapSettings {
     static final int[] TEXT_COLORS = {0xFFFFFFFF, 0xFFFFEB3B, 0xFF00E5FF, 0xFF69F0AE, 0xFFFF80AB, 0xFFFF5252, 0xFF000000};
     static final int[] EDGE_COLORS = {0xFF000000, 0xFFFFFFFF, 0xFF1A237E, 0xFFB71C1C, 0xFF1B5E20, 0xFFFFEB3B};
     static final int[] BG_COLORS = {0xFF000000, 0xFF202028, 0xFF1B2A4A, 0xFF3A1B1B, 0xFF1B3A2A, 0xFFFFFFFF};
 
-    /** TextView that can draw an outline around its letters. */
     static class CapText extends TextView {
         float outW;
         int outCol = 0xFF000000;
@@ -40,7 +35,7 @@ class CapSettings {
 
         CapText(Context c) { super(c); }
 
-        @Override public void invalidate() { if (!drawing) super.invalidate(); } // setTextColor() inside onDraw must not loop
+        @Override public void invalidate() { if (!drawing) super.invalidate(); }
 
         @Override
         protected void onDraw(Canvas cv) {
@@ -60,7 +55,6 @@ class CapSettings {
         }
     }
 
-    /** Puts the saved style on a caption TextView (the real one in the player, or the preview). */
     static void apply(TextView tv, SharedPreferences p, Context c) {
         float d = c.getResources().getDisplayMetrics().density;
         tv.setTextSize(p.getInt("cc_size", 17));
@@ -90,7 +84,6 @@ class CapSettings {
 
     static void show(MainActivity a, Runnable onChange) { new CapSettings(a, onChange).open(); }
 
-    // ---------- the screen ----------
     final MainActivity a;
     final SharedPreferences p;
     final Runnable onChange;
@@ -200,7 +193,6 @@ class CapSettings {
         w.setLayout(Ui.MATCH, Ui.MATCH);
     }
 
-    // ---------- row builders ----------
     LinearLayout section(LinearLayout col, String title) {
         TextView v = Ui.text(a, title, 13, Ui.ACC, true);
         v.setPadding(Ui.dp(a, 20), Ui.dp(a, 20), Ui.dp(a, 16), Ui.dp(a, 8));
